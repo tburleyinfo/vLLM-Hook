@@ -106,6 +106,9 @@ For example `model_configs/attention_tracker/granite-3.1-8b-instruct.json`.
 
 ## 🏠 Plugin Architecture
 
+Architecture spec for backend extensibility:
+- `docs/architecture_vllm_centered_backends.md`
+
 The main package is structured as follows:
 
 ```
