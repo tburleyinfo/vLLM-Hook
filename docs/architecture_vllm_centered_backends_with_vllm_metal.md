@@ -46,6 +46,8 @@ Provide a Metal-aware hook worker that composes official `MetalWorker` behavior 
 ### How
 
 1. Add `MetalHookCaptureBackend` in vLLM-Hook that writes the same artifact schema used today.
+   This is not currently in vllm-hook.
+   class ProbeHookQKWorker(V1Worker):
 2. Add worker integration that starts from `vllm_metal.v1.worker.MetalWorker` lifecycle, then attaches capture logic where Q/K tensors are available.
 3. Keep analyzer pipeline unchanged (Torch/MLX backends read the same artifacts).
 

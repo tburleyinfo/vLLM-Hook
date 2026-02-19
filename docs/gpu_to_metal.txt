@@ -1,0 +1,9 @@
+Register worker in registry.
+
+Add backend negotiation logic possibly hook_llm.py
+
+Separate worker directory for mlx.
+
+write lines in __init__.py.
+
+flag and platform detection in hook_llm.py.

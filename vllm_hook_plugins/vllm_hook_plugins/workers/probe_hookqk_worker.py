@@ -3,6 +3,8 @@ import math
 import torch
 from typing import Dict, List
 from vllm.v1.worker.gpu_worker import Worker as V1Worker
+
+#from vllm_metal.v1.worker.MetalWorker as V1Worker
 from vllm.forward_context import get_forward_context
 import re
 from vllm.distributed import parallel_state as ps
@@ -29,13 +31,13 @@ class ProbeHookQKWorker(V1Worker):
 
     def load_model(self, *args, **kwargs):
         r = super().load_model(*args, **kwargs)
-        
+
         try:
             self._install_hooks()
             print("Hooks installed successfully")
         except Exception as e:
             print(f"Hook installation failed: {e}")
-            
+
         return r
 
     def _install_hooks(self):
@@ -49,16 +51,16 @@ class ProbeHookQKWorker(V1Worker):
         self.run_id_file = os.environ.get("VLLM_RUN_ID")
         self.hookq_mode = os.environ.get("VLLM_HOOKQ_MODE", "all_tokens") # ["last_token", "all_tokens"]
         tp_rank = int(ps.get_tensor_model_parallel_rank())
-        
+
         if not all([self.hook_dir, self.hook_flag, self.run_id_file]):
             print("Missing hook environment variables")
-            return            
+            return
 
         self.layer_to_heads = self._parse_layer_heads()
         self.important_layers = set(self.layer_to_heads.keys())
-        
+
         self._run_cache = {}
-        
+
         cfg = model.config
         num_h = int(getattr(cfg, "num_attention_heads"))
         num_kv = int(getattr(cfg, "num_key_value_heads", num_h))
@@ -90,12 +92,12 @@ class ProbeHookQKWorker(V1Worker):
             # Warmup or non-attention passes: nothing to do
             if metadata is None:
                 return
-        
+
             # seq_lens = metadata.seq_lens
             seq_lens = getattr(metadata, "seq_lens", None)
             if seq_lens is None and module_name in metadata:
                 seq_lens = metadata[module_name].seq_lens
-            
+
             # assert (seq_lens).sum() == metadata.num_actual_tokens, "Please set enable_prefix_caching=False for batch processing."
             last_indices = torch.cumsum(seq_lens, dim=0)
             bs = len(last_indices)
@@ -119,7 +121,7 @@ class ProbeHookQKWorker(V1Worker):
                 q_tokens.extend(list(input[0][last_indices[1:] - 1,:].detach().cpu()))
             else:
                 raise NotImplementedError
-            k_all_tokens.extend([input[1][last_indices[i]:last_indices[i+1],:].detach().cpu() for i in range(bs)])     
+            k_all_tokens.extend([input[1][last_indices[i]:last_indices[i+1],:].detach().cpu() for i in range(bs)])
 
             cache["qk_cache"][module_name] = {
                 'q': q_tokens,
@@ -132,12 +134,12 @@ class ProbeHookQKWorker(V1Worker):
             cache_path = os.path.join(run_dir, "qk.pt")
             torch.save(cache, cache_path)
 
-        # register hooks on attention modules 
+        # register hooks on attention modules
         self._hooks = []
         matched = []
         for name, module in model.named_modules():
             layer_num = match_attn(name)
-            if layer_num is None: # not an attention module 
+            if layer_num is None: # not an attention module
                 continue
             if layer_num not in self.important_layers:
                 continue
@@ -146,24 +148,24 @@ class ProbeHookQKWorker(V1Worker):
             )
             self._hooks.append(hook)
             matched.append(name)
-        
+
         print(f"Installed {len(self._hooks)} hooks on layers: {matched}")
 
     def _parse_layer_heads(self) -> Dict[int, List[int]]:
         ## Parse 'VLLM_HOOK_LAYER_HEADS' env var from string to dict: '0:0,3,6;15:2' → {0:[0,3,6], 15:[2]}
         layer_heads = os.environ.get("VLLM_HOOK_LAYER_HEADS", "")
         result = {}
-        
+
         for part in layer_heads.split(";"):
             part = part.strip()
             if not part:
                 continue
-            
+
             layer_str, heads_str = part.split(":")
             layer_idx = int(layer_str)
             head_indices = sorted([int(h) for h in heads_str.split(",") if h])
             result[layer_idx] = head_indices
-        
+
         return result
 
     def execute_model(self, *args, **kwargs):
