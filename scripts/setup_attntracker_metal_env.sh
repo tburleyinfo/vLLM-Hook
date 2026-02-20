@@ -39,7 +39,7 @@ uv pip install -r "$HOOK_REPO_ROOT/requirement.txt"
 uv pip install -e "$HOOK_REPO_ROOT/vllm_hook_plugins"
 uv pip install ipykernel jupyterlab
 
-python -m ipykernel install --user --name "$KERNEL_NAME" --display-name "$KERNEL_DISPLAY" --force
+python -m ipykernel install --user --name "$KERNEL_NAME" --display-name "$KERNEL_DISPLAY"
 
 echo ""
 echo "Setup complete."
