@@ -62,7 +62,9 @@ def apply_chat_template_and_get_ranges(tokenizer, model_name: str, query: str, d
 
 if __name__ == "__main__":
 
-    cache_dir = "/dccstor/pyrite/irene/"
+    # Original: cache_dir = "/dccstor/pyrite/irene/"
+    cache_dir = os.path.expanduser("~/.cache/vllm_hook")
+    os.makedirs(cache_dir, exist_ok=True)
     model = 'mistralai/Mistral-7B-Instruct-v0.3' # 'ibm-granite/granite-3.1-8b-instruct'  # 'Qwen/Qwen2-1.5B-Instruct' #
     
     dtype_map = {

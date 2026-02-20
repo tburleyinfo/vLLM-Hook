@@ -4,6 +4,64 @@
 
 This document provides a concrete, file-by-file approach to migrate vLLM-Hook from using the standard vLLM library to vLLM-Metal for Apple Silicon support. The strategy focuses on **replacing vLLM imports with vLLM-Metal equivalents** while maintaining the existing hook architecture and artifact contract.
 
+## Prerequisite: Install vLLM-Metal First
+
+Install vLLM-Metal before implementing backend negotiation and Metal workers.
+Run the install command from the `vllm-metal` repository directory (or pass that path explicitly), not from `vLLM-Hook`.
+Use Python `>=3.12,<3.14` for `vllm-metal`; Python 3.11 is not supported.
+
+```bash
+# Option A: from vllm-metal directory
+cd /Users/timothyburley/opensource/vllm-metal
+# If vLLM is available on your platform:
+pip install -e '.[vllm]'
+
+# On Apple Silicon/macOS, use the installer flow if pip vLLM install fails:
+./install.sh
+
+# Option B: from vLLM-Hook directory (explicit path)
+cd /Users/timothyburley/opensource/vLLM-Hook
+pip install -e ../vllm-metal
+pip install -r requirement.txt
+pip install -e vllm_hook_plugins
+```
+
+If your environment is offline or build-isolated, ensure `maturin` is available locally before running the command.
+
+## Apple Silicon Notebook Environment Flow (Moved from README)
+
+Use this when `demo_attntracker.ipynb` must run from the same environment that installs `vllm-metal`.
+
+From `vLLM-Hook/`:
+
+```bash
+./scripts/setup_attntracker_metal_env.sh
+```
+
+What it does:
+- runs `vllm-metal/install.sh` from the `vllm-metal` repo directory
+- creates/uses `vllm-metal/.venv-vllm-metal`
+- installs `vLLM-Hook` requirements and `vllm_hook_plugins` into that env
+- installs `ipykernel`/`jupyterlab` and registers kernel `vllm-metal-attntracker`
+
+Launch notebook:
+
+```bash
+./scripts/run_attntracker_notebook.sh
+```
+
+In Jupyter:
+
+```text
+Kernel → Change Kernel → vllm-metal-attntracker
+```
+
+If `vllm-metal` is not in `../vllm-metal`, set:
+
+```bash
+VLLM_METAL_REPO=/absolute/path/to/vllm-metal ./scripts/setup_attntracker_metal_env.sh
+```
+
 ## Key Insight from Code Analysis
 
 The TODO comment in [`hook_llm.py:48`](my_fork_of_vllm_hook/vLLM-Hook/vllm_hook_plugins/vllm_hook_plugins/hook_llm.py:48) states:

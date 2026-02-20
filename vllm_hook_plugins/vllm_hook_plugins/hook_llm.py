@@ -2,10 +2,19 @@ import os
 import json
 import glob
 import uuid
+import platform
+import importlib.util
 from typing import Optional, Dict, List
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 from vllm import LLM, SamplingParams
+
+
+def _use_metal_workers() -> bool:
+    if platform.system() != "Darwin" or platform.machine() not in ("arm64", "aarch64"):
+        return False
+    return importlib.util.find_spec("vllm_metal") is not None
+
 
 class HookLLM:
     def __init__(
@@ -14,7 +23,8 @@ class HookLLM:
         worker_name: str = None,
         analyzer_name: str = None,
         config_file: str = None,
-        download_dir: str = '~/.cache',
+        # Original: download_dir: str = '~/.cache',
+        download_dir: str = "~/.cache/vllm_hook",
         enable_hook: bool = True,
         hook_dir: str = None,
         enforce_eager: bool = True,
@@ -27,12 +37,21 @@ class HookLLM:
         self.enable_hook = enable_hook
         self.enforce_eager = enforce_eager
 
+        # Original:
+        # if hook_dir is not None:
+        #     HOOK_DIR = hook_dir
+        # else:
+        #     HOOK_DIR = os.path.join(download_dir,'_v1_qk_peeks')
+        # os.makedirs(HOOK_DIR, exist_ok=True)
+        # self._hook_dir = HOOK_DIR
+        resolved_download_dir = os.path.abspath(os.path.expanduser(download_dir))
         if hook_dir is not None:
-            HOOK_DIR = hook_dir
+            resolved_hook_dir = os.path.abspath(os.path.expanduser(hook_dir))
         else:
-            HOOK_DIR = os.path.join(download_dir,'_v1_qk_peeks')
-        os.makedirs(HOOK_DIR, exist_ok=True)
-        self._hook_dir = HOOK_DIR
+            resolved_hook_dir = os.path.join(resolved_download_dir, "_v1_qk_peeks")
+
+        os.makedirs(resolved_hook_dir, exist_ok=True)
+        self._hook_dir = resolved_hook_dir
         self._hook_flag = os.path.join(self._hook_dir, "EXTRACT.flag")
         self._run_id_file = os.path.join(self._hook_dir, "RUN_ID.txt")
 
@@ -44,6 +63,13 @@ class HookLLM:
         if config_file:
             self.load_config(config_file)
 
+        if _use_metal_workers():
+            # Avoid c10d TCPStore/bootstrap hangs on macOS by pinning loopback
+            # and using single-process engine startup by default.
+            os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+            os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")
+            os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+            os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo0")
 
         #TODO: Backend Negotiation needs to happen here.
         worker = None
@@ -52,12 +78,25 @@ class HookLLM:
             from vllm_hook_plugins import PluginRegistry
             vllm.plugins.load_general_plugins()
 
-            worker = PluginRegistry.get_worker(worker_name).path
+            # Original: worker = PluginRegistry.get_worker(worker_name).path
+            worker_obj = PluginRegistry.get_worker(worker_name)
+            if worker_obj is None:
+                raise ValueError(f"Unknown worker_name: {worker_name}")
+
+            worker = worker_obj.path
+            if _use_metal_workers():
+                if worker_name == "probe_hook_qk":
+                    from vllm_hook_plugins.workers.metal import ProbeHookQKWorkerMetal
+                    worker = f"{ProbeHookQKWorkerMetal.__module__}.{ProbeHookQKWorkerMetal.__name__}"
+                elif worker_name == "steer_hook_act":
+                    from vllm_hook_plugins.workers.metal import SteerHookActWorkerMetal
+                    worker = f"{SteerHookActWorkerMetal.__module__}.{SteerHookActWorkerMetal.__name__}"
 
 
         self.llm = LLM(
             model=model,
-            download_dir=download_dir,
+            # Original: download_dir=download_dir,
+            download_dir=resolved_download_dir,
             worker_cls=worker,
             enforce_eager = enforce_eager,
             **vllm_kwargs

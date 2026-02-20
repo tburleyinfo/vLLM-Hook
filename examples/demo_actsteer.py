@@ -11,7 +11,9 @@ from vllm import SamplingParams
 
 if __name__ == "__main__":
 
-    cache_dir = "/dccstor/pyrite/irene/"
+    # Original: cache_dir = "/dccstor/pyrite/irene/"
+    cache_dir = os.path.expanduser("~/.cache/vllm_hook")
+    os.makedirs(cache_dir, exist_ok=True)
     model = 'microsoft/Phi-3-mini-4k-instruct'
     
     dtype_map = {
