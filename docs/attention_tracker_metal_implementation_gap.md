@@ -317,6 +317,36 @@ Both backends MUST produce identical artifact format:
 | **Tensor Conversion** | N/A | `mlx_to_torch()` required |
 | **Hook Mechanism** | PyTorch hooks | ❌ **NEEDS IMPLEMENTATION** |
 
+## Immediate Fix for the `model.config` Error
+
+If hook installation fails because Metal models do not expose `model.config`, use
+`MetalModelRunner._extract_model_args()` and read from `self.model_runner.model_args`.
+
+```python
+# probe_hookqk_worker_metal.py
+if hasattr(self.model_runner, "_extract_model_args"):
+    self.model_runner._extract_model_args()
+model_args = getattr(self.model_runner, "model_args", {}) or {}
+
+num_h = int(model_args.get("num_attention_heads") or model_args.get("n_heads") or 32)
+num_kv = int(model_args.get("num_key_value_heads") or model_args.get("n_kv_heads") or num_h)
+hidden = int(model_args.get("hidden_size") or model_args.get("dim") or 4096)
+head_dim = int(model_args.get("head_dim") or (hidden // num_h))
+attn_mult = float(model_args.get("attention_multiplier") or (1 / math.sqrt(head_dim)))
+```
+
+Also guard hook registration to avoid silent failures when the model is MLX-backed:
+
+```python
+if not hasattr(model, "named_modules"):
+    print("Metal model does not expose named_modules(); cannot install PyTorch-style forward hooks.")
+    return
+```
+
+This fixes the config-attribute crash and makes the real blocker explicit:
+MLX models still do not provide PyTorch `named_modules()` /
+`register_forward_hook()` interception.
+
 ## Next Steps
 
 1. **Research MLX model internals** to understand layer access

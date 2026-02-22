@@ -58,12 +58,21 @@ class ProbeHookQKWorkerMetal(MetalWorker):
 
         self._run_cache = {}
 
-        cfg = model.config
-        num_h = int(getattr(cfg, "num_attention_heads"))
-        num_kv = int(getattr(cfg, "num_key_value_heads", num_h))
-        hidden = int(getattr(cfg, "hidden_size"))
-        head_dim = hidden // num_h
-        attn_mult = float(getattr(cfg, "attention_multiplier", 1 / math.sqrt(head_dim)))
+        # vllm-metal exposes normalized model config through model_runner.model_args.
+        # Refresh that dict first so we do not rely on model.config (often missing on MLX models).
+        if hasattr(self.model_runner, "_extract_model_args"):
+            self.model_runner._extract_model_args()
+        model_args = getattr(self.model_runner, "model_args", {}) or {}
+
+        num_h = int(model_args.get("num_attention_heads") or model_args.get("n_heads") or 32)
+        num_kv = int(
+            model_args.get("num_key_value_heads") or model_args.get("n_kv_heads") or num_h
+        )
+        hidden = int(model_args.get("hidden_size") or model_args.get("dim") or 4096)
+        head_dim = int(model_args.get("head_dim") or (hidden // num_h))
+        attn_mult = float(
+            model_args.get("attention_multiplier") or (1 / math.sqrt(head_dim))
+        )
         self._conf = dict(
             num_attention_heads=num_h,
             num_key_value_heads=num_kv,
@@ -131,11 +140,20 @@ class ProbeHookQKWorkerMetal(MetalWorker):
 
         self._hooks = []
         matched = []
+        if not hasattr(model, "named_modules"):
+            print(
+                "Metal model does not expose named_modules(); "
+                "cannot install PyTorch-style forward hooks."
+            )
+            return
+
         for name, module in model.named_modules():
             layer_num = match_attn(name)
             if layer_num is None:
                 continue
             if layer_num not in self.important_layers:
+                continue
+            if not hasattr(module, "register_forward_hook"):
                 continue
             hook = module.register_forward_hook(lambda m, i, o, n=name: qkv_hook(i, n))
             self._hooks.append(hook)
