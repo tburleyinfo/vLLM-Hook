@@ -1,5 +1,7 @@
 import os
 import math
+import inspect
+import json
 import torch
 from typing import Dict, List
 from vllm_metal.v1.worker import MetalWorker
@@ -25,14 +27,51 @@ def match_attn(name: str):
 
 
 class ProbeHookQKWorkerMetal(MetalWorker):
+    @staticmethod
+    def _canonical_attn_layer_name(layer_idx: int) -> str:
+        return f"model.layers.{layer_idx}.self_attn.attn"
+
+    @staticmethod
+    def _model_accepts_qk_callback(model) -> bool:
+        call_fn = getattr(model, "__call__", None)
+        if call_fn is None:
+            return False
+        try:
+            sig = inspect.signature(call_fn)
+        except (TypeError, ValueError):
+            return False
+        params = sig.parameters.values()
+        has_named = any(p.name == "qk_capture_callback" for p in params)
+        has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+        return has_named or has_kwargs
+
     def load_model(self, *args, **kwargs):
         r = super().load_model(*args, **kwargs)
 
         try:
-            self._install_hooks()
-            print("Metal hooks installed successfully")
+            # Original:
+            # self._install_hooks()
+            # print("Metal hooks installed successfully")
+            install_result = self._install_hooks()
+            mode = install_result.get("mode", "none")
+            if mode == "native":
+                count = int(install_result.get("count", 0))
+                layers = install_result.get("layers", [])
+                print(f"Installed {count} hooks on layers: {layers}")
+                print("Metal hooks installed successfully (native capture)")
+            elif mode == "pytorch":
+                count = int(install_result.get("count", 0))
+                layers = install_result.get("layers", [])
+                print(f"Installed {count} hooks on layers: {layers}")
+                print("Metal hooks installed successfully (pytorch hooks)")
+            else:
+                raise RuntimeError(
+                    "No active metal hook capture path was installed."
+                )
         except Exception as e:
             print(f"Metal hook installation failed: {e}")
+            # Do not continue model execution if hook installation failed.
+            raise
 
         return r
 
@@ -51,10 +90,15 @@ class ProbeHookQKWorkerMetal(MetalWorker):
 
         if not all([self.hook_dir, self.hook_flag, self.run_id_file]):
             print("Missing hook environment variables")
-            return
+            return {"mode": "none"}
 
         self.layer_to_heads = self._parse_layer_heads()
         self.important_layers = set(self.layer_to_heads.keys())
+        if not self.important_layers:
+            raise RuntimeError(
+                "No hook layers resolved. Set VLLM_HOOK_LAYER_HEADS or provide "
+                "VLLM_HOOK_CONFIG with params.important_heads."
+            )
 
         self._run_cache = {}
 
@@ -140,12 +184,31 @@ class ProbeHookQKWorkerMetal(MetalWorker):
 
         self._hooks = []
         matched = []
+        # Prefer model-runner native capture when callback support exists.
+        callback_supported = getattr(
+            self.model_runner, "_supports_qk_capture_callback", None
+        )
+        if callback_supported is None:
+            callback_supported = self._model_accepts_qk_callback(model)
+        if callback_supported is True:
+            layer_list = sorted(
+                [self._canonical_attn_layer_name(i) for i in self.important_layers]
+            )
+            print(
+                "Using model-runner native Q/K capture path "
+                f"for layers: {layer_list}"
+            )
+            return {"mode": "native", "count": len(layer_list), "layers": layer_list}
+
         if not hasattr(model, "named_modules"):
             print(
                 "Metal model does not expose named_modules(); "
                 "cannot install PyTorch-style forward hooks."
             )
-            return
+            raise RuntimeError(
+                "No hook installation path available: "
+                "native callback unsupported and model has no named_modules()."
+            )
 
         for name, module in model.named_modules():
             layer_num = match_attn(name)
@@ -160,18 +223,54 @@ class ProbeHookQKWorkerMetal(MetalWorker):
             matched.append(name)
 
         print(f"Installed {len(self._hooks)} metal hooks on layers: {matched}")
+        if len(self._hooks) == 0:
+            raise RuntimeError(
+                "PyTorch-style hook path installed zero hooks; "
+                "check ATTN_PATTERNS and VLLM_HOOK_LAYER_HEADS."
+            )
+        return {"mode": "pytorch", "count": len(self._hooks), "layers": matched}
 
     def _parse_layer_heads(self) -> Dict[int, List[int]]:
+        # Original:
+        # layer_heads = os.environ.get("VLLM_HOOK_LAYER_HEADS", "")
         layer_heads = os.environ.get("VLLM_HOOK_LAYER_HEADS", "")
         result = {}
-        for part in layer_heads.split(";"):
-            part = part.strip()
-            if not part:
-                continue
-            layer_str, heads_str = part.split(":")
-            layer_idx = int(layer_str)
-            head_indices = sorted([int(h) for h in heads_str.split(",") if h])
-            result[layer_idx] = head_indices
+
+        if layer_heads.strip():
+            for part in layer_heads.split(";"):
+                part = part.strip()
+                if not part:
+                    continue
+                layer_str, heads_str = part.split(":")
+                layer_idx = int(layer_str)
+                head_indices = sorted([int(h) for h in heads_str.split(",") if h])
+                result[layer_idx] = head_indices
+            return result
+
+        # Fallback: parse attention-tracker config directly.
+        config_path = os.environ.get("VLLM_HOOK_CONFIG", "").strip()
+        if config_path:
+            if not os.path.exists(config_path):
+                raise RuntimeError(
+                    f"VLLM_HOOK_CONFIG is set but file does not exist: {config_path}"
+                )
+            with open(config_path, "r") as f:
+                config_data = json.load(f)
+            important_heads = (
+                config_data.get("params", {}).get("important_heads", [])
+            )
+            for pair in important_heads:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    continue
+                layer_idx = int(pair[0])
+                head_idx = int(pair[1])
+                if layer_idx not in result:
+                    result[layer_idx] = []
+                result[layer_idx].append(head_idx)
+
+            for layer_idx in list(result.keys()):
+                result[layer_idx] = sorted(set(result[layer_idx]))
+
         return result
 
     def execute_model(self, *args, **kwargs):

@@ -78,6 +78,7 @@ CLI 🧰 :
 ```bash
 python examples/demo_attntracker.py
 ```
+Metal setup and local-edit workflow (Apple Silicon): `docs/metal_docs/README.md`
 
 ### 2. Core Reranker (In-Model Relevance Ranking)
 

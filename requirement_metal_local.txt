@@ -1,0 +1,5 @@
+-r requirement_metal.txt
+
+# Local editable repos (relative to vLLM-Hook/)
+-e ../vllm-metal
+-e ../mlx-lm

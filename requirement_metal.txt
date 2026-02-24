@@ -1,0 +1,18 @@
+# Metal backend requirements
+# Use with vLLM-Metal + Apple Silicon
+
+# Shared deps
+torch>=2.0
+numpy>=1.24
+blake3
+
+# Metal backend stack
+vllm>=0.14
+mlx
+
+# Original:
+# vllm-metal
+# mlx-lm
+# For local editable repos, use `requirement_metal_local.txt`:
+# -e ../vllm-metal
+# -e ../mlx-lm

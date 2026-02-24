@@ -8,8 +8,18 @@ __pycache__/
 
 # Virtual environments
 .venv/
+.venv*/
+.venv-*/
+.venv-vLLM-Hook/
+.venv-vLLM-Hook-py312/
 venv/
+venv*/
+venv-*/
 env/
+env*/
+env-*/
+.virtualenv/
+.virtualenvs/
 .env
 
 # Test and tooling caches
@@ -33,4 +43,3 @@ pip-wheel-metadata/
 # Local model/cache directories
 .cache/
 _v1_qk_peeks/
-

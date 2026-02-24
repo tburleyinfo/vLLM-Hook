@@ -43,12 +43,19 @@ if __name__ == "__main__":
     # Original: cache_dir = "/dccstor/pyrite/irene/"
     cache_dir = os.path.expanduser("~/.cache/vllm_hook")
     os.makedirs(cache_dir, exist_ok=True)
-    model = 'ibm-granite/granite-3.1-8b-instruct'  # 'Qwen/Qwen2-1.5B-Instruct' # 'mistralai/Mistral-7B-Instruct-v0.3' # 
+    # model = 'ibm-granite/granite-3.1-8b-instruct'  # 'Qwen/Qwen2-1.5B-Instruct' # 'mistralai/Mistral-7B-Instruct-v0.3' #
+    # Default to a smaller model for local Apple Silicon laptops.
+    model = os.environ.get("ATTNTRACKER_MODEL", "Qwen/Qwen2-1.5B-Instruct")
+    # max_model_len=2048
+    max_model_len = int(os.environ.get("ATTNTRACKER_MAX_MODEL_LEN", "1024"))
+    # gpu_memory_utilization=0.7
+    gpu_memory_utilization = float(os.environ.get("ATTNTRACKER_GPU_MEM_UTIL", "0.7"))
     
     dtype_map = {
         'mistralai/Mistral-7B-Instruct-v0.3': torch.float16,
         'ibm-granite/granite-3.1-8b-instruct': torch.float16,
-        'Qwen/Qwen2-1.5B-Instruct': torch.float
+        # 'Qwen/Qwen2-1.5B-Instruct': torch.float
+        'Qwen/Qwen2-1.5B-Instruct': torch.float16,
     }
     
     llm = HookLLM(
@@ -57,8 +64,8 @@ if __name__ == "__main__":
         analyzer_name="attn_tracker",
         config_file=f'model_configs/attention_tracker/{model.split("/")[-1]}.json',
         download_dir=cache_dir,
-        gpu_memory_utilization=0.7,
-        max_model_len=2048,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
         trust_remote_code=True,
         dtype=dtype_map[model],
         enforce_eager=True,

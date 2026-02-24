@@ -1,0 +1,25 @@
+Register worker in registry.
+
+Add backend negotiation logic possibly hook_llm.py
+
+Separate worker directory for mlx.
+
+write lines in __init__.py.
+
+flag and platform detection in hook_llm.py.
+
+Implement capture/steering at vllm-metal runner level first
+vllm-hook’s current hook model assumes PyTorch named_modules/register_forward_hook, which MLX models generally don’t expose. So the right first move is adding a Metal-native interception API in vllm_metal around model execution.
+
+Touch mlx-lm only if vllm-metal cannot access needed internals
+If you need Q/K tensors or layer activations that vllm-metal can’t currently observe, then add extension points in mlx-lm (or MLX model wrappers).
+
+Only touch core mlx if framework-level capability is missing
+Use this when you need new low-level runtime/kernel behavior, not just model-level plumbing.
+
+Then adapt vllm-hook to consume the new Metal-native API
+Don’t force Torch-style hooks; wire vllm-hook workers/analyzers to whatever callback/artifact contract vllm-metal provides.
+
+So yes on sequencing across repos, but not “use torch-esque syntax in MLX.” Prefer MLX-native interfaces and expose a stable contract upward.
+
+

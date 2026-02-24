@@ -112,6 +112,9 @@ class HookLLM:
 
 
     def load_config(self, config_file: str):
+        # Export config path so workers can fallback to config parsing when needed.
+        os.environ["VLLM_HOOK_CONFIG"] = os.path.abspath(config_file)
+
         with open(config_file, 'r') as f:
             config_data = json.load(f)
 
