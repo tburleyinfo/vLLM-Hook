@@ -1,0 +1,49 @@
+digraph vllm_hook_callback_path {
+  graph [
+    rankdir=LR,
+    splines=ortho,
+    bgcolor="white",
+    pad="0.2",
+    nodesep="0.5",
+    ranksep="0.8"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="#EAF4FF",
+    color="#1F5AA6",
+    fontname="Helvetica",
+    fontsize=11,
+    margin="0.14,0.08"
+  ];
+
+  edge [
+    color="#5E6B7A",
+    arrowsize=0.8,
+    penwidth=1.2
+  ];
+
+  b0 [label="HookLLM.generate\n(use_hook=True)"];
+  b1 [label="HookLLM sets env\nand run lifecycle"];
+  b2 [label="VLLM_HOOK_DIR / FLAG /\nRUN_ID / LAYER_HEADS / CONFIG"];
+  b3 [label="vLLM-Hook Metal worker:\nProbeHookQKWorkerMetal"];
+  b4 [label="load_model ->\n_install_hooks"];
+  b5 [label="Choose capture path"];
+  b6 [label="Native callback path\npreferred when supported", shape=diamond, fillcolor="#F2F8FF"];
+  b7 [label="vllm-metal\nmodel_runner._forward_model"];
+  b8 [label="Pass\nqk_capture_callback"];
+  b9 [label="mlx-lm model signatures\naccept callback"];
+  b10 [label="Attention layer invokes\ncallback with layer_idx + layer_name"];
+  b11 [label="vllm-metal\n_capture_qk"];
+  b12 [label="Convert MLX arrays\nto torch(cpu)"];
+  b13 [label="Write qk.pt in existing\nartifact schema"];
+  b14 [label="HookLLM.analyze"];
+  b15 [label="Existing analyzers run\nunchanged"];
+  b16 [label="Fallback: PyTorch-style hooks\nonly if module APIs exist", fillcolor="#FFF7E6", color="#B26A00"];
+
+  b0 -> b1 -> b2 -> b3 -> b4 -> b5 -> b6;
+  b6 -> b7 [label=" yes", color="#1F5AA6", fontcolor="#1F5AA6"];
+  b7 -> b8 -> b9 -> b10 -> b11 -> b12 -> b13 -> b14 -> b15;
+  b6 -> b16 [label=" no", color="#B26A00", fontcolor="#B26A00"];
+}

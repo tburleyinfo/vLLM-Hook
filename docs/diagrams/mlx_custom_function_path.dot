@@ -1,0 +1,39 @@
+digraph mlx_custom_function_path {
+  graph [
+    rankdir=LR,
+    splines=ortho,
+    bgcolor="white",
+    pad="0.2",
+    nodesep="0.5",
+    ranksep="0.8"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="#FFF7E6",
+    color="#B26A00",
+    fontname="Helvetica",
+    fontsize=11,
+    margin="0.14,0.08"
+  ];
+
+  edge [
+    color="#7A7A7A",
+    arrowsize=0.8,
+    penwidth=1.2
+  ];
+
+  a0 [label="HookLLM.generate\n(use_hook=True)"];
+  a1 [label="vllm-metal\nMetalWorker"];
+  a2 [label="vllm-metal\nMetalModelRunner"];
+  a3 [label="mlx-lm model forward"];
+  a4 [label="Attention math internals"];
+  a5 [label="mlx.custom_function\nwrapped op"];
+  a6 [label="Returns tensors to\nsurrounding MLX code"];
+  a7 [label="No built-in worker\nartifact contract", fillcolor="#FDECEC", color="#B03A2E"];
+  a8 [label="No run-id / hook-flag\nlifecycle unless manually bridged", fillcolor="#FDECEC", color="#B03A2E"];
+  a9 [label="Not vLLM-Hook example-\ncompatible by itself", fillcolor="#FDECEC", color="#B03A2E"];
+
+  a0 -> a1 -> a2 -> a3 -> a4 -> a5 -> a6 -> a7 -> a8 -> a9;
+}

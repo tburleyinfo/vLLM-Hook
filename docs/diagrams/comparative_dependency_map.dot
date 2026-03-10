@@ -1,0 +1,71 @@
+digraph comparative_dependency_map {
+  graph [
+    rankdir=LR,
+    splines=ortho,
+    bgcolor="white",
+    pad="0.25",
+    nodesep="0.45",
+    ranksep="0.9",
+    label="Comparative Dependency Map",
+    labelloc="t",
+    fontsize=18,
+    fontname="Helvetica-Bold"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Helvetica",
+    fontsize=10,
+    margin="0.14,0.08"
+  ];
+
+  edge [
+    arrowsize=0.8,
+    penwidth=1.2
+  ];
+
+  subgraph cluster_left {
+    label="MLX custom_function path";
+    color="#E4A11B";
+    penwidth=1.4;
+    style="rounded";
+
+    l0 [label="HookLLM.generate", fillcolor="#FFF7E6", color="#B26A00"];
+    l1 [label="MetalWorker", fillcolor="#FFF7E6", color="#B26A00"];
+    l2 [label="MetalModelRunner", fillcolor="#FFF7E6", color="#B26A00"];
+    l3 [label="mlx-lm model forward", fillcolor="#FFF7E6", color="#B26A00"];
+    l4 [label="Attention internals", fillcolor="#FFF7E6", color="#B26A00"];
+    l5 [label="mlx.custom_function", fillcolor="#FFF7E6", color="#B26A00"];
+    l6 [label="Back to MLX execution", fillcolor="#FFF7E6", color="#B26A00"];
+    l7 [label="Missing worker/artifact\ncontract by default", fillcolor="#FDECEC", color="#B03A2E"];
+
+    l0 -> l1 -> l2 -> l3 -> l4 -> l5 -> l6 -> l7;
+  }
+
+  subgraph cluster_right {
+    label="Added callback / worker-compatible path";
+    color="#4A86CF";
+    penwidth=1.4;
+    style="rounded";
+
+    r0 [label="HookLLM.generate", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r1 [label="HookLLM env + lifecycle", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r2 [label="ProbeHookQKWorkerMetal", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r3 [label="model_runner._forward_model", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r4 [label="qk_capture_callback", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r5 [label="mlx-lm attention callback", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r6 [label="_capture_qk", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r7 [label="MLX -> torch(cpu)", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r8 [label="Write qk.pt", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r9 [label="HookLLM.analyze", fillcolor="#EAF4FF", color="#1F5AA6"];
+    r10 [label="Existing analyzers", fillcolor="#EAF4FF", color="#1F5AA6"];
+
+    r0 -> r1 -> r2 -> r3 -> r4 -> r5 -> r6 -> r7 -> r8 -> r9 -> r10;
+  }
+
+  compare [shape=note, label="Difference:\ncustom_function changes MLX math\ninside the model.\nThe added callback path preserves\nvLLM-Hook worker and analyzer logic.", fillcolor="#F7F7F7", color="#888888"];
+
+  l5 -> compare [style=dashed, color="#B26A00"];
+  r4 -> compare [style=dashed, color="#1F5AA6"];
+}
