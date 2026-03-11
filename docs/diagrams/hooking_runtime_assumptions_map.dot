@@ -1,0 +1,105 @@
+digraph hooking_runtime_assumptions_map {
+  graph [
+    rankdir=TB,
+    splines=ortho,
+    bgcolor="white",
+    pad="0.25",
+    nodesep="0.45",
+    ranksep="0.9",
+    label="Hooking Runtime Assumptions: vLLM/PyTorch vs vLLM-Metal/MLX",
+    labelloc="t",
+    fontsize=18,
+    fontname="Helvetica-Bold"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Helvetica",
+    fontsize=10,
+    margin="0.14,0.08"
+  ];
+
+  edge [
+    arrowsize=0.8,
+    penwidth=1.2
+  ];
+
+  subgraph cluster_torch {
+    label="Assumed by vLLM-Hook on vLLM + PyTorch";
+    color="#4A86CF";
+    penwidth=1.4;
+    style="rounded";
+
+    t0 [label="model_runner.model is a\nPyTorch nn.Module tree", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t1 [label="named_modules() exists", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t2 [label="register_forward_hook()\nexists on target modules", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t3 [label="module names match\nmodel.layers.<i>.self_attn.attn", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t4 [label="hook inputs/outputs are\ntorch.Tensor", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t5 [label="worker can do\n.detach().cpu()", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t6 [label="worker can torch.save\nqk.pt artifacts", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t7 [label="model.config exposes\nattention dimensions", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t8 [label="steering hook can mutate\nlayer outputs in-place-ish", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t9 [label="Result: Hooking works as a\nworker-layer concern", fillcolor="#DDF3E4", color="#2E8B57"];
+
+    t0 -> t1 -> t2 -> t3;
+    t2 -> t4 -> t5 -> t6;
+    t0 -> t7;
+    t2 -> t8;
+    t3 -> t9;
+    t6 -> t9;
+    t7 -> t9;
+    t8 -> t9;
+  }
+
+  subgraph cluster_mlx {
+    label="Not inherently assumed by vLLM-Metal + MLX";
+    color="#E4A11B";
+    penwidth=1.4;
+    style="rounded";
+
+    m0 [label="model_runner.model may be\nan MLX model object", fillcolor="#FFF7E6", color="#B26A00"];
+    m1 [label="named_modules() may be\nmissing", fillcolor="#FDECEC", color="#B03A2E"];
+    m2 [label="register_forward_hook()\nmay be missing", fillcolor="#FDECEC", color="#B03A2E"];
+    m3 [label="layer identity is not\nsurfaced by a Torch module tree", fillcolor="#FDECEC", color="#B03A2E"];
+    m4 [label="attention tensors are\nmx.array, not torch.Tensor", fillcolor="#FFF7E6", color="#B26A00"];
+    m5 [label="model.config may be absent\nor incomplete", fillcolor="#FFF7E6", color="#B26A00"];
+    m6 [label="worker-level hook install is\nnot enough by itself", fillcolor="#FDECEC", color="#B03A2E"];
+
+    m0 -> m1;
+    m0 -> m2;
+    m0 -> m3;
+    m0 -> m4;
+    m0 -> m5;
+    m1 -> m6;
+    m2 -> m6;
+    m3 -> m6;
+    m4 -> m6;
+    m5 -> m6;
+  }
+
+  subgraph cluster_required {
+    label="What had to be added for MLX compatibility";
+    color="#888888";
+    penwidth=1.2;
+    style="rounded,dashed";
+
+    r0 [label="vllm-metal model_runner\npasses qk_capture_callback", fillcolor="#F7F7F7", color="#666666"];
+    r1 [label="mlx-lm model signatures\naccept callback", fillcolor="#F7F7F7", color="#666666"];
+    r2 [label="attention layer invokes callback\nwith layer_idx + layer_name", fillcolor="#F7F7F7", color="#666666"];
+    r3 [label="Metal worker converts\nmx.array -> torch(cpu)", fillcolor="#F7F7F7", color="#666666"];
+    r4 [label="Metal worker reads\nmodel_runner.model_args", fillcolor="#F7F7F7", color="#666666"];
+    r5 [label="Result: Hooking works only\nwith explicit callback plumbing", fillcolor="#DDF3E4", color="#2E8B57"];
+
+    r0 -> r1 -> r2 -> r3 -> r5;
+    r4 -> r5;
+  }
+
+  m6 -> r0 [style=dashed, color="#666666"];
+  m4 -> r3 [style=dashed, color="#666666"];
+  m5 -> r4 [style=dashed, color="#666666"];
+
+  note [shape=note, label="Summary:\nPyTorch path assumes hookability from the runtime.\nMLX path requires explicit callback seams,\nconfig normalization, and tensor conversion.", fillcolor="#F7F7F7", color="#888888"];
+  t9 -> note [style=dashed, color="#1F5AA6"];
+  r5 -> note [style=dashed, color="#666666"];
+}

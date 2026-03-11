@@ -1,6 +1,6 @@
 digraph mlx_custom_function_path {
   graph [
-    rankdir=LR,
+    rankdir=TB,
     splines=ortho,
     bgcolor="white",
     pad="0.2",

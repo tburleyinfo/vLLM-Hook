@@ -1,0 +1,73 @@
+digraph metal_backend_config_current_vs_target {
+  graph [
+    rankdir=TB,
+    splines=ortho,
+    bgcolor="white",
+    pad="0.25",
+    nodesep="0.45",
+    ranksep="0.9",
+    label="vLLM-Hook + vLLM-Metal: Current vs Target Config Flow",
+    labelloc="t",
+    fontsize=18,
+    fontname="Helvetica-Bold"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Helvetica",
+    fontsize=10,
+    margin="0.14,0.08"
+  ];
+
+  edge [
+    arrowsize=0.8,
+    penwidth=1.2
+  ];
+
+  subgraph cluster_current {
+    label="What Is There Now";
+    color="#E4A11B";
+    penwidth=1.4;
+    style="rounded";
+
+    c0 [label="model_configs/*.json\nexist and contain hook intent", fillcolor="#FFF7E6", color="#B26A00"];
+    c1 [label="HookLLM.load_config()\nparses config file", fillcolor="#FFF7E6", color="#B26A00"];
+    c2 [label="HookLLM exports env vars:\nVLLM_HOOK_LAYER_HEADS\nVLLM_HOOKQ_MODE\nVLLM_ACTSTEER_CONFIG\nVLLM_HOOK_CONFIG", fillcolor="#FFF7E6", color="#B26A00"];
+    c3 [label="Metal worker reads\nVLLM_HOOK_LAYER_HEADS\nor falls back to\nVLLM_HOOK_CONFIG", fillcolor="#FFF7E6", color="#B26A00"];
+    c4 [label="Metal worker gets runtime\nshape/config from\nmodel_runner.model_args", fillcolor="#FFF7E6", color="#B26A00"];
+    c5 [label="Hook selection partly config-driven,\npartly reconstructed in worker", fillcolor="#FDECEC", color="#B03A2E"];
+    c6 [label="Config is used, but not yet a\nsingle normalized hook-spec contract", fillcolor="#FDECEC", color="#B03A2E"];
+
+    c0 -> c1 -> c2 -> c3;
+    c3 -> c5;
+    c4 -> c5;
+    c5 -> c6;
+  }
+
+  subgraph cluster_target {
+    label="What Ought To Be There";
+    color="#4A86CF";
+    penwidth=1.4;
+    style="rounded";
+
+    t0 [label="model_configs/*.json\nare the source of truth\nfor hook intent", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t1 [label="HookLLM resolves config into a\nnormalized HookSpec", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t2 [label="HookSpec contains:\nimportant_layers\nlayer_to_heads\nhookq_mode\nsteering settings\nother hook policy", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t3 [label="Same HookSpec is passed to\nvLLM and Metal workers", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t4 [label="Workers do not infer hook intent\nfrom model.config", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t5 [label="Workers only use backend runtime\nmetadata for execution facts", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t6 [label="vLLM worker uses:\nmodel.config", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t7 [label="Metal worker uses:\nmodel_runner.model_args", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t8 [label="Both workers emit the same\nartifact schema for analyzers", fillcolor="#DDF3E4", color="#2E8B57"];
+
+    t0 -> t1 -> t2 -> t3 -> t4 -> t5;
+    t5 -> t6 -> t8;
+    t5 -> t7 -> t8;
+  }
+
+  gap [shape=note, label="Main gap:\nCurrent Metal flow still re-parses or reconstructs pieces\nof hook intent inside the worker.\nTarget flow makes model_configs the canonical hook-spec layer.", fillcolor="#F7F7F7", color="#888888"];
+
+  c6 -> gap [style=dashed, color="#B03A2E"];
+  t1 -> gap [style=dashed, color="#1F5AA6"];
+}

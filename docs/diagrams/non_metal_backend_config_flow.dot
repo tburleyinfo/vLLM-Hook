@@ -1,0 +1,46 @@
+digraph non_metal_backend_config_flow {
+  graph [
+    rankdir=TB,
+    splines=ortho,
+    bgcolor="white",
+    pad="0.25",
+    nodesep="0.45",
+    ranksep="0.9",
+    label="vLLM-Hook + vLLM/PyTorch: Current Config and Hook Flow",
+    labelloc="t",
+    fontsize=18,
+    fontname="Helvetica-Bold"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Helvetica",
+    fontsize=10,
+    margin="0.14,0.08"
+  ];
+
+  edge [
+    arrowsize=0.8,
+    penwidth=1.2
+  ];
+
+  c0 [label="model_configs/*.json\ncontain hook intent", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c1 [label="HookLLM.load_config()\nreads config file", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c2 [label="HookLLM parses:\nparams.important_heads\nhookq.hookq_mode\nsteering config", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c3 [label="HookLLM exports env vars:\nVLLM_HOOK_LAYER_HEADS\nVLLM_HOOKQ_MODE\nVLLM_ACTSTEER_CONFIG", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c4 [label="ProbeHookQKWorker or\nSteerHookActWorker starts", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c5 [label="Worker re-parses env into:\nlayer_to_heads\nimportant_layers\nhook mode", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c6 [label="Worker reads runtime model\nfrom model_runner.model", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c7 [label="Worker uses Torch assumptions:\nnamed_modules()\nregister_forward_hook()\nmodel.config", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c8 [label="Worker maps config-selected layers\nto actual runtime modules", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c9 [label="Hooks capture/modify tensors", fillcolor="#EAF4FF", color="#1F5AA6"];
+  c10 [label="Worker writes qk.pt artifacts\nor applies steering", fillcolor="#DDF3E4", color="#2E8B57"];
+  c11 [label="Analyzers use shared artifact schema", fillcolor="#DDF3E4", color="#2E8B57"];
+
+  c0 -> c1 -> c2 -> c3 -> c4 -> c5 -> c6 -> c7 -> c8 -> c9 -> c10 -> c11;
+
+  note [shape=note, label="Current non-Metal flow:\nconfig provides hook intent,\nworker performs runtime mapping and installation\nagainst the PyTorch module graph.", fillcolor="#F7F7F7", color="#888888"];
+  c5 -> note [style=dashed, color="#1F5AA6"];
+  c8 -> note [style=dashed, color="#1F5AA6"];
+}

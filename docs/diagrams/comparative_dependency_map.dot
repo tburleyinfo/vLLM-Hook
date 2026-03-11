@@ -1,6 +1,6 @@
 digraph comparative_dependency_map {
   graph [
-    rankdir=LR,
+    rankdir=TB,
     splines=ortho,
     bgcolor="white",
     pad="0.25",

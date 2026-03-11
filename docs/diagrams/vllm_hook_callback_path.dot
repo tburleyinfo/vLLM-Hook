@@ -1,6 +1,6 @@
 digraph vllm_hook_callback_path {
   graph [
-    rankdir=LR,
+    rankdir=TB,
     splines=ortho,
     bgcolor="white",
     pad="0.2",
