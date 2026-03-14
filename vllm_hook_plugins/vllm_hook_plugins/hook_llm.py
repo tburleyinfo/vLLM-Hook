@@ -2,10 +2,18 @@ import os
 import json
 import glob
 import uuid
+import platform
+import importlib.util
 from typing import Optional, Dict, List
 os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 from vllm import LLM, SamplingParams
+
+
+def _use_metal_workers() -> bool:
+    if platform.system() != "Darwin" or platform.machine() not in ("arm64", "aarch64"):
+        return False
+    return importlib.util.find_spec("vllm_metal") is not None
 
 class HookLLM:
     def __init__(
@@ -14,23 +22,24 @@ class HookLLM:
         worker_name: str = None,
         analyzer_name: str = None,
         config_file: str = None,
-        download_dir: str = '~/.cache',
+        download_dir: str = "~/.cache/vllm_hook",
         enable_hook: bool = True,
         hook_dir: str = None,
         enforce_eager: bool = True,
         **vllm_kwargs
     ):
-        
+
         self.model_name = model
         self.worker_name = worker_name
         self.analyzer_name = analyzer_name
         self.enable_hook = enable_hook
         self.enforce_eager = enforce_eager
 
+        resolved_download_dir = os.path.abspath(os.path.expanduser(download_dir))
         if hook_dir is not None:
-            HOOK_DIR = hook_dir
+            HOOK_DIR = os.path.abspath(os.path.expanduser(hook_dir))
         else:
-            HOOK_DIR = os.path.join(download_dir,'_v1_qk_peeks')
+            HOOK_DIR = os.path.join(resolved_download_dir, "_v1_qk_peeks")
         os.makedirs(HOOK_DIR, exist_ok=True)
         self._hook_dir = HOOK_DIR
         self._hook_flag = os.path.join(self._hook_dir, "EXTRACT.flag")
@@ -43,19 +52,27 @@ class HookLLM:
         self.layer_to_heads = {}
         if config_file:
             self.load_config(config_file)
-        
+
+        if _use_metal_workers():
+            os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+            os.environ.setdefault("VLLM_HOST_IP", "127.0.0.1")
+            os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+            os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo0")
 
         worker = None
         if worker_name:
             import vllm.plugins
             from vllm_hook_plugins import PluginRegistry
             vllm.plugins.load_general_plugins()
-            
-            worker = PluginRegistry.get_worker(worker_name).path
+
+            worker_obj = PluginRegistry.get_worker(worker_name)
+            if worker_obj is None:
+                raise ValueError(f"Unknown worker_name: {worker_name}")
+            worker = worker_obj.path
 
         self.llm = LLM(
             model=model,
-            download_dir=download_dir,
+            download_dir=resolved_download_dir,
             worker_cls=worker,
             enforce_eager = enforce_eager,
             **vllm_kwargs
@@ -71,6 +88,8 @@ class HookLLM:
 
     
     def load_config(self, config_file: str):
+        os.environ["VLLM_HOOK_CONFIG"] = os.path.abspath(config_file)
+
         with open(config_file, 'r') as f:
             config_data = json.load(f)
         

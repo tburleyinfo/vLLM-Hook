@@ -40,8 +40,15 @@ def apply_chat_template_and_get_ranges(tokenizer, model_name: str, instruction: 
 
 if __name__ == "__main__":
 
-    cache_dir = "/dccstor/pyrite/irene/"
-    model = 'ibm-granite/granite-3.1-8b-instruct'  # 'Qwen/Qwen2-1.5B-Instruct' # 'mistralai/Mistral-7B-Instruct-v0.3' # 
+    cache_dir = os.path.abspath(
+        os.path.expanduser(os.environ.get("ATTNTRACKER_CACHE_DIR", "~/.cache/vllm_hook"))
+    )
+    model = os.environ.get(
+        "ATTNTRACKER_MODEL",
+        "ibm-granite/granite-3.1-8b-instruct",
+    )
+    gpu_memory_utilization = float(os.environ.get("ATTNTRACKER_GPU_MEM_UTIL", "0.7"))
+    max_model_len = int(os.environ.get("ATTNTRACKER_MAX_MODEL_LEN", "2048"))
     
     dtype_map = {
         'mistralai/Mistral-7B-Instruct-v0.3': torch.float16,
@@ -55,8 +62,8 @@ if __name__ == "__main__":
         analyzer_name="attn_tracker",
         config_file=f'model_configs/attention_tracker/{model.split("/")[-1]}.json',
         download_dir=cache_dir,
-        gpu_memory_utilization=0.7,
-        max_model_len=2048,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
         trust_remote_code=True,
         dtype=dtype_map[model],
         enforce_eager=True,

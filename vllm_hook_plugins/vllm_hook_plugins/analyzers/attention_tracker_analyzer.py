@@ -87,7 +87,9 @@ class AttntrackerAnalyzer:
                 attention_tensor = layer_data['attention']  # [num_heads, seq_len]
                 
                 for i, _ in enumerate(head_indices):
-                    head_attention = attention_tensor[i, :].numpy()  # [seq_len]
+                    head_attention = (
+                        attention_tensor[i, :].detach().to(dtype=torch.float32).numpy()
+                    )  # [seq_len]
                     
                     # Get instruction and data attention
                     inst_attn = head_attention[input_range[0][0]:input_range[0][1]]

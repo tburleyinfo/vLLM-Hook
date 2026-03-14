@@ -1,0 +1,103 @@
+digraph hooking_runtime_assumptions_map_current {
+  graph [
+    rankdir=TB,
+    splines=ortho,
+    bgcolor="white",
+    pad="0.25",
+    nodesep="0.45",
+    ranksep="0.9",
+    label="Hooking Runtime Assumptions: Current PyTorch vs MLX Path for vLLM-Hook",
+    labelloc="t",
+    fontsize=18,
+    fontname="Helvetica-Bold"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fontname="Helvetica",
+    fontsize=10,
+    margin="0.14,0.08"
+  ];
+
+  edge [
+    arrowsize=0.8,
+    penwidth=1.2
+  ];
+
+  subgraph cluster_torch {
+    label="Current vLLM + PyTorch path";
+    color="#4A86CF";
+    penwidth=1.4;
+    style="rounded";
+
+    t0 [label="model_runner.model is a\nPyTorch nn.Module tree", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t1 [label="named_modules() exists", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t2 [label="register_forward_hook()\nexists on target modules", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t3 [label="hook target resolves as\nmodel.layers.<i>.self_attn.attn", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t4 [label="hook inputs are\nQ/K torch.Tensor values", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t5 [label="worker uses\nget_forward_context().attn_metadata", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t6 [label="worker slices per-request\nQ/K and torch.save(qk.pt)", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t7 [label="model.config provides\nattention dimensions", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t8 [label="steering hook can replace\nlayer output in hook return", fillcolor="#EAF4FF", color="#1F5AA6"];
+    t9 [label="Result: Hooking remains a\nworker-layer concern", fillcolor="#DDF3E4", color="#2E8B57"];
+
+    t0 -> t1 -> t2 -> t3 -> t4 -> t6 -> t9;
+    t5 -> t6;
+    t7 -> t9;
+    t8 -> t9;
+  }
+
+  subgraph cluster_mlx {
+    label="Current vLLM-Metal + MLX path";
+    color="#E4A11B";
+    penwidth=1.4;
+    style="rounded";
+
+    m0 [label="model_runner.model is an\nMLX nn.Module tree", fillcolor="#FFF7E6", color="#B26A00"];
+    m1 [label="mlx.nn.Module now exposes\nnamed_modules()", fillcolor="#EAF4FF", color="#1F5AA6"];
+    m2 [label="mlx.nn.Module now exposes\nPyTorch-style register_forward_hook()", fillcolor="#EAF4FF", color="#1F5AA6"];
+    m3 [label="mlx-lm Qwen2 now exposes\nmodel.layers.<i>.self_attn.attn", fillcolor="#EAF4FF", color="#1F5AA6"];
+    m4 [label="paged-attention wrapper preserves\nself_attn.attn as a hook tap", fillcolor="#EAF4FF", color="#1F5AA6"];
+    m5 [label="hook inputs are still\nmx.array-derived tensors", fillcolor="#FFF7E6", color="#B26A00"];
+    m6 [label="Metal worker converts hook\ninputs to torch(cpu)", fillcolor="#F7F7F7", color="#666666"];
+    m7 [label="runner exposes per-forward\nseq_lens via _hook_seq_lens", fillcolor="#F7F7F7", color="#666666"];
+    m8 [label="vllm-metal publishes\nseq_lens through\nvllm.forward_context.attn_metadata", fillcolor="#EAF4FF", color="#1F5AA6"];
+    m9 [label="model.config is not the source of truth;\nworker uses model_runner.model_args", fillcolor="#F7F7F7", color="#666666"];
+    m10 [label="Result: Hooking now looks like\nPyTorch at the worker surface,\nwith forward-context compatibility\nprovided underneath by vllm-metal", fillcolor="#DDF3E4", color="#2E8B57"];
+
+    m0 -> m1 -> m2 -> m3 -> m4;
+    m4 -> m5 -> m6 -> m10;
+    m7 -> m8 -> m10;
+    m9 -> m10;
+    m2 -> m10;
+  }
+
+  subgraph cluster_delta {
+    label="Runtime assumptions that still differ";
+    color="#888888";
+    penwidth=1.2;
+    style="rounded,dashed";
+
+    d0 [label="PyTorch hook payloads are\nnative torch.Tensor", fillcolor="#F7F7F7", color="#666666"];
+    d1 [label="MLX hook payloads must be\nadapted before artifact write", fillcolor="#F7F7F7", color="#666666"];
+    d2 [label="PyTorch path gets request slicing\nfrom attn_metadata", fillcolor="#F7F7F7", color="#666666"];
+    d3 [label="MLX path now also gets request slicing\nfrom attn_metadata;\nvllm-metal synthesizes that metadata\nfrom runner seq_lens", fillcolor="#DDF3E4", color="#2E8B57"];
+    d4 [label="Proper abstraction boundary:\nPyTorch-like module hooks in mlx,\nmodel-shape exposure in mlx-lm,\nrequest-state exposure in vllm-metal", fillcolor="#DDF3E4", color="#2E8B57"];
+
+    d0 -> d1;
+    d2 -> d3;
+    d1 -> d4;
+    d3 -> d4;
+  }
+
+  t4 -> d0 [style=dashed, color="#1F5AA6"];
+  m5 -> d1 [style=dashed, color="#B26A00"];
+  t5 -> d2 [style=dashed, color="#1F5AA6"];
+  m8 -> d3 [style=dashed, color="#B26A00"];
+
+  note [shape=note, label="Summary:\nThe old MLX path required explicit callback plumbing because PyTorch-style hook surfaces and request metadata were missing.\nThe current path restores PyTorch-like module traversal and forward hooks in MLX,\nexposes self_attn.attn in mlx-lm, and has vllm-metal publish request metadata through the upstream forward_context interface.", fillcolor="#F7F7F7", color="#888888"];
+  t9 -> note [style=dashed, color="#1F5AA6"];
+  m10 -> note [style=dashed, color="#666666"];
+  d4 -> note [style=dashed, color="#666666"];
+}
