@@ -19,6 +19,7 @@ import importlib.util
 import json
 import math
 import os
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,6 +60,7 @@ class RunSnapshot:
     tags: tuple[str, ...]
     config: dict[str, Any]
     summary: dict[str, Any]
+    records: tuple[dict[str, Any], ...] = ()
 
 
 def load_local_wandb_config() -> dict[str, str]:
@@ -178,6 +180,44 @@ def run_config(run: Any) -> dict[str, Any]:
     }
 
 
+def artifact_records(run: Any) -> tuple[dict[str, Any], ...]:
+    try:
+        artifacts = list(run.logged_artifacts())
+    except Exception:
+        return ()
+
+    selected = next(
+        (
+            artifact
+            for artifact in artifacts
+            if getattr(artifact, "type", "") == "vllm-hook-minimal-parity"
+        ),
+        None,
+    )
+    if selected is None:
+        return ()
+
+    root = (
+        Path(tempfile.gettempdir())
+        / "vllm_hook_parity_report_artifacts"
+        / str(getattr(run, "id", "run"))
+    )
+    try:
+        artifact_dir = Path(selected.download(root=str(root)))
+    except Exception:
+        return ()
+
+    for json_path in sorted(artifact_dir.glob("*.json")):
+        try:
+            payload = json.loads(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        records = payload.get("records")
+        if isinstance(records, list):
+            return tuple(row for row in records if isinstance(row, dict))
+    return ()
+
+
 def snapshot(project: str, run: Any) -> RunSnapshot:
     return RunSnapshot(
         project=project,
@@ -190,6 +230,7 @@ def snapshot(project: str, run: Any) -> RunSnapshot:
         tags=tuple(str(tag) for tag in (getattr(run, "tags", []) or [])),
         config=run_config(run),
         summary=run_summary(run),
+        records=artifact_records(run),
     )
 
 
@@ -399,6 +440,13 @@ def escape_table_cell(value: Any) -> str:
     return text.replace("|", "\\|").replace("\n", "<br>")
 
 
+def truncate_text(value: Any, limit: int = 180) -> str:
+    text = str(value or "").replace("\n", "\\n").replace("\r", "\\r")
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "..."
+
+
 def render_card(text: str) -> str:
     return (
         '<div style="margin: 18px 0; padding: 18px 20px; border: 1px solid #e5e7eb; '
@@ -442,6 +490,36 @@ def render_metric_table(title: str, headers: list[str], rows: list[list[str]]) -
         body_rows.append(f"<tr>{row_cells}</tr>")
     table = (
         '<table style="display: inline-table; width: auto; max-width: 100%; border-collapse: collapse; font-size: 0.95em;">'
+        f"<thead><tr>{head_cells}</tr></thead>"
+        f"<tbody>{''.join(body_rows)}</tbody>"
+        "</table>"
+    )
+    return render_card(
+        f'<h3 style="margin: 0 0 12px;">{html.escape(title)}</h3>\n'
+        f"{table}"
+    )
+
+
+def render_wrapping_table(title: str, headers: list[str], rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+    head_cells = "".join(
+        f'<th style="text-align: left; padding: 8px 10px; border-bottom: 1px solid #d1d5db;">{html.escape(header)}</th>'
+        for header in headers
+    )
+    body_rows = []
+    for row in rows:
+        row_cells = "".join(
+            '<td style="text-align: left; vertical-align: top; padding: 8px 10px; '
+            'border-bottom: 1px solid #e5e7eb; max-width: 360px; white-space: normal; '
+            'overflow-wrap: anywhere;">'
+            f"{html.escape(value)}"
+            "</td>"
+            for value in row
+        )
+        body_rows.append(f"<tr>{row_cells}</tr>")
+    table = (
+        '<table style="width: 100%; border-collapse: collapse; font-size: 0.92em;">'
         f"<thead><tr>{head_cells}</tr></thead>"
         f"<tbody>{''.join(body_rows)}</tbody>"
         "</table>"
@@ -584,6 +662,99 @@ def project_nested_layer_cards(project: str, runs: list[RunSnapshot]) -> list[st
     return cards
 
 
+def first_record(run: RunSnapshot) -> dict[str, Any]:
+    return run.records[0] if run.records else {}
+
+
+def spotlight_output_markdown(runs: list[RunSnapshot]) -> str:
+    rows: list[list[str]] = []
+    for index, run in enumerate(runs):
+        record = first_record(run)
+        if not record:
+            continue
+        rows.append(
+            [
+                run_display_label(run, index),
+                truncate_text(record.get("baseline_text")),
+                truncate_text(record.get("spotlight_text")),
+                json.dumps(record.get("baseline_tokens", [])),
+                json.dumps(record.get("spotlight_tokens", [])),
+                str(record.get("text_changed_by_spotlight", "")),
+            ]
+        )
+    return render_wrapping_table(
+        "Generated Output Changes",
+        [
+            "Backend",
+            "Baseline Text",
+            "Spotlight Text",
+            "Baseline Tokens",
+            "Spotlight Tokens",
+            "Changed",
+        ],
+        rows,
+    )
+
+
+def spotlight_platform_parity_markdown(runs: list[RunSnapshot]) -> str:
+    if len(runs) < 2:
+        return ""
+    left, right = runs[0], runs[1]
+    left_record = first_record(left)
+    right_record = first_record(right)
+    if not left_record or not right_record:
+        return ""
+    rows = [
+        [
+            "Baseline text",
+            str(left_record.get("baseline_text") == right_record.get("baseline_text")),
+            truncate_text(left_record.get("baseline_text")),
+            truncate_text(right_record.get("baseline_text")),
+        ],
+        [
+            "Spotlight text",
+            str(left_record.get("spotlight_text") == right_record.get("spotlight_text")),
+            truncate_text(left_record.get("spotlight_text")),
+            truncate_text(right_record.get("spotlight_text")),
+        ],
+        [
+            "Baseline tokens",
+            str(left_record.get("baseline_tokens") == right_record.get("baseline_tokens")),
+            json.dumps(left_record.get("baseline_tokens", [])),
+            json.dumps(right_record.get("baseline_tokens", [])),
+        ],
+        [
+            "Spotlight tokens",
+            str(left_record.get("spotlight_tokens") == right_record.get("spotlight_tokens")),
+            json.dumps(left_record.get("spotlight_tokens", [])),
+            json.dumps(right_record.get("spotlight_tokens", [])),
+        ],
+    ]
+    return render_wrapping_table(
+        "Platform Output Parity",
+        [
+            "Field",
+            "Matches",
+            run_display_label(left),
+            run_display_label(right),
+        ],
+        rows,
+    )
+
+
+def project_output_cards(project: str, runs: list[RunSnapshot]) -> list[str]:
+    if project != "spotlight":
+        return []
+    cards = []
+    output_card = spotlight_output_markdown(runs)
+    if output_card:
+        cards.append(output_card)
+    parity_card = spotlight_platform_parity_markdown(runs)
+    if parity_card:
+        cards.append(parity_card)
+    return cards
+
+
 def project_summary_markdown(project: str, runs: list[RunSnapshot]) -> str:
     keys = metric_keys(runs)
     if not runs:
@@ -646,6 +817,7 @@ def markdown_report(project_runs: dict[str, list[RunSnapshot]]) -> str:
     for project, runs in project_runs.items():
         sections.append(render_section_header(project))
         sections.append(project_summary_markdown(project, runs))
+        sections.extend(project_output_cards(project, runs))
         delta = project_delta_markdown(project, runs)
         if delta:
             sections.append(delta)
@@ -690,6 +862,8 @@ def render_project_card(wr: Any, project: str, runs: list[RunSnapshot], entity: 
     blocks: list[Any] = []
     blocks.append(wr.MarkdownBlock(text=render_section_header(project)))
     blocks.append(wr.MarkdownBlock(text=project_summary_markdown(project, runs)))
+    for card in project_output_cards(project, runs):
+        blocks.append(wr.MarkdownBlock(text=card))
     delta_block = project_delta_block(wr, project, runs)
     if delta_block is not None:
         blocks.append(delta_block)
