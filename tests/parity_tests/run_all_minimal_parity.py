@@ -97,7 +97,8 @@ def parse_args() -> argparse.Namespace:
         ),
         help=(
             "Fallback/requested W&B project value. Benchmark runs are logged "
-            "to app-specific projects: attntracker, corereranker, steering."
+            "to app-specific projects: attntracker, corereranker, steering, "
+            "hiddenstates, and spotlight."
         ),
     )
     parser.add_argument(
