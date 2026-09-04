@@ -1,0 +1,187 @@
+name: Codex Notebook Translation
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_notebook:
+        description: Source notebook to translate from
+        required: true
+        default: notebooks/demo_spotlight.ipynb
+      target_notebook:
+        description: Target notebook to create or refresh
+        required: true
+        default: notebooks/metal/demo_spotlight_metal.ipynb
+      parity_command:
+        description: Command to validate the translated notebook; leave blank to skip
+        required: false
+        default: python tests/parity_tests/run_all_minimal_parity.py --skip-colab
+      setup_command:
+        description: Optional environment setup command before parity
+        required: false
+        default: python -m pip install nbformat pytest
+      runner:
+        description: Runner label; use a self-hosted Metal runner for Metal parity
+        required: true
+        default: macos-latest
+      codex_effort:
+        description: Codex reasoning effort
+        required: true
+        default: high
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-notebook-translation-${{ github.ref }}-${{ inputs.target_notebook }}
+  cancel-in-progress: false
+
+jobs:
+  translate:
+    name: Translate notebook with Codex
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate requested paths
+        shell: bash
+        env:
+          SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
+          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -f "$SOURCE_NOTEBOOK" ]; then
+            echo "Source notebook does not exist: $SOURCE_NOTEBOOK" >&2
+            exit 1
+          fi
+
+          case "$SOURCE_NOTEBOOK" in
+            notebooks/*.ipynb) ;;
+            *)
+              echo "Source notebook must be under notebooks/: $SOURCE_NOTEBOOK" >&2
+              exit 1
+              ;;
+          esac
+
+          case "$TARGET_NOTEBOOK" in
+            notebooks/*.ipynb) ;;
+            *)
+              echo "Target notebook must be under notebooks/: $TARGET_NOTEBOOK" >&2
+              exit 1
+              ;;
+          esac
+
+          mkdir -p "$(dirname "$TARGET_NOTEBOOK")"
+
+      - name: Run setup command
+        if: ${{ inputs.setup_command != '' }}
+        shell: bash
+        env:
+          SETUP_COMMAND: ${{ inputs.setup_command }}
+        run: |
+          set -euo pipefail
+          bash -lc "$SETUP_COMMAND"
+
+      - name: Build Codex prompt
+        shell: bash
+        env:
+          SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
+          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+          PARITY_COMMAND: ${{ inputs.parity_command }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p .codex-runtime
+          cp .github/prompts/notebook-translation.md .codex-runtime/notebook-translation.md
+
+          {
+            printf '\n## Requested Translation\n\n'
+            printf 'Source notebook: `%s`\n' "$SOURCE_NOTEBOOK"
+            printf 'Target notebook: `%s`\n' "$TARGET_NOTEBOOK"
+            printf 'Parity command: `%s`\n\n' "${PARITY_COMMAND:-<skipped>}"
+            printf 'Modify `%s` so it is the translated counterpart of `%s`.\n' "$TARGET_NOTEBOOK" "$SOURCE_NOTEBOOK"
+          } >> .codex-runtime/notebook-translation.md
+
+      - name: Translate notebook
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: .codex-runtime/notebook-translation.md
+          output-file: .codex-runtime/codex-final-message.md
+          permission-profile: ":workspace"
+          effort: ${{ inputs.codex_effort }}
+
+      - name: Validate notebook JSON
+        shell: bash
+        env:
+          SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
+          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import os
+          import nbformat
+
+          for name in ("SOURCE_NOTEBOOK", "TARGET_NOTEBOOK"):
+              path = os.environ[name]
+              with open(path, encoding="utf-8") as handle:
+                  nbformat.read(handle, as_version=4)
+              print(f"Validated notebook JSON: {path}")
+          PY
+
+      - name: Run parity command
+        if: ${{ inputs.parity_command != '' }}
+        shell: bash
+        env:
+          PARITY_COMMAND: ${{ inputs.parity_command }}
+        run: |
+          set -euo pipefail
+          bash -lc "$PARITY_COMMAND"
+
+      - name: Collect translation diff
+        if: ${{ always() }}
+        shell: bash
+        env:
+          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p .codex-runtime
+          git add -N "$TARGET_NOTEBOOK" 2>/dev/null || true
+          git status --short > .codex-runtime/git-status.txt
+          git diff --binary > .codex-runtime/notebook-translation.patch
+
+          {
+            echo "## Codex Notebook Translation"
+            echo
+            echo "### Status"
+            echo
+            echo '```'
+            cat .codex-runtime/git-status.txt
+            echo '```'
+            echo
+            echo "### Patch"
+            echo
+            echo "Download the workflow artifact named \`codex-notebook-translation\` and review \`notebook-translation.patch\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload translation artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-notebook-translation
+          if-no-files-found: warn
+          path: |
+            .codex-runtime/codex-final-message.md
+            .codex-runtime/git-status.txt
+            .codex-runtime/notebook-translation.patch
+            ${{ inputs.target_notebook }}
