@@ -18,7 +18,7 @@ on:
       setup_command:
         description: Optional environment setup command before parity
         required: false
-        default: python -m pip install nbformat pytest
+        default: python -m pip install -r requirement.txt && python -m pip install -e vllm_hook_plugins && python -m pip install pytest
       runner:
         description: Runner label; use a self-hosted Metal runner for Metal parity
         required: true
@@ -44,6 +44,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -108,6 +110,8 @@ jobs:
             printf 'Target notebook: `%s`\n' "$TARGET_NOTEBOOK"
             printf 'Parity command: `%s`\n\n' "${PARITY_COMMAND:-<skipped>}"
             printf 'Modify `%s` so it is the translated counterpart of `%s`.\n' "$TARGET_NOTEBOOK" "$SOURCE_NOTEBOOK"
+            printf 'If the translated notebook requires supporting package code, tests, configs, or docs that are missing on this branch, create or port those files too.\n'
+            printf 'You may inspect local and remote branches in this full-depth checkout to find the nearest existing implementation, but keep the final diff scoped to the notebook translation and its required dependencies.\n'
           } >> .codex-runtime/notebook-translation.md
 
       - name: Translate notebook
@@ -150,13 +154,17 @@ jobs:
       - name: Collect translation diff
         if: ${{ always() }}
         shell: bash
-        env:
-          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
         run: |
           set -euo pipefail
 
           mkdir -p .codex-runtime
-          git add -N "$TARGET_NOTEBOOK" 2>/dev/null || true
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              .codex-runtime/*) continue ;;
+            esac
+            git add -N "$path" 2>/dev/null || true
+          done < <(git ls-files --others --exclude-standard -z)
+
           git status --short > .codex-runtime/git-status.txt
           git diff --binary > .codex-runtime/notebook-translation.patch
 
