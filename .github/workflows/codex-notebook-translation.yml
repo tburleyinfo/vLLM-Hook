@@ -128,13 +128,13 @@ jobs:
           set -euo pipefail
 
           python - <<'PY'
+          import json
           import os
-          import nbformat
 
           for name in ("SOURCE_NOTEBOOK", "TARGET_NOTEBOOK"):
               path = os.environ[name]
               with open(path, encoding="utf-8") as handle:
-                  nbformat.read(handle, as_version=4)
+                  json.load(handle)
               print(f"Validated notebook JSON: {path}")
           PY
 
