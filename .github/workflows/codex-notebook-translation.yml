@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       source_notebook:
-        description: Source notebook to translate from
-        required: true
-        default: notebooks/demo_spotlight.ipynb
+        description: Optional source notebook; blank discovers notebooks without Metal counterparts
+        required: false
+        default: ""
       target_notebook:
-        description: Target notebook to create or refresh
-        required: true
-        default: notebooks/metal/demo_spotlight_metal.ipynb
+        description: Optional target notebook; blank infers notebooks/metal/<name>_metal.ipynb
+        required: false
+        default: ""
       parity_command:
         description: Command to validate the translated notebook; leave blank to skip
         required: false
@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: codex-notebook-translation-${{ github.ref }}-${{ inputs.target_notebook }}
+  group: codex-notebook-translation-${{ github.ref }}-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -52,7 +52,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Validate requested paths
+      - name: Resolve translation targets
+        id: resolve
         shell: bash
         env:
           SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
@@ -60,43 +61,73 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ ! -f "$SOURCE_NOTEBOOK" ]; then
-            echo "Source notebook does not exist: $SOURCE_NOTEBOOK" >&2
-            exit 1
-          fi
+          mkdir -p .codex-runtime notebooks/metal
 
-          case "$SOURCE_NOTEBOOK" in
-            notebooks/*.ipynb) ;;
-            *)
-              echo "Source notebook must be under notebooks/: $SOURCE_NOTEBOOK" >&2
-              exit 1
-              ;;
-          esac
+          python - <<'PY'
+          import os
+          from pathlib import Path
 
-          case "$TARGET_NOTEBOOK" in
-            notebooks/*.ipynb) ;;
-            *)
-              echo "Target notebook must be under notebooks/: $TARGET_NOTEBOOK" >&2
-              exit 1
-              ;;
-          esac
+          source_input = os.environ["SOURCE_NOTEBOOK"].strip()
+          target_input = os.environ["TARGET_NOTEBOOK"].strip()
+          targets_path = Path(".codex-runtime/translation-targets.tsv")
 
-          mkdir -p "$(dirname "$TARGET_NOTEBOOK")"
+          def reject(message):
+              raise SystemExit(message)
 
-      - name: Run setup command
-        if: ${{ inputs.setup_command != '' }}
-        shell: bash
-        env:
-          SETUP_COMMAND: ${{ inputs.setup_command }}
-        run: |
-          set -euo pipefail
-          bash -lc "$SETUP_COMMAND"
+          def validate_notebook_path(value, role):
+              path = Path(value)
+              if path.is_absolute() or ".." in path.parts:
+                  reject(f"{role} notebook must be a relative path inside this repository: {value}")
+              if path.suffix != ".ipynb":
+                  reject(f"{role} notebook must be a .ipynb file: {value}")
+              if not path.parts or path.parts[0] != "notebooks":
+                  reject(f"{role} notebook must be under notebooks/: {value}")
+              return path
+
+          def inferred_target_for(source):
+              return Path("notebooks/metal") / f"{source.stem}_metal.ipynb"
+
+          targets = []
+          if source_input:
+              source = validate_notebook_path(source_input, "Source")
+              if len(source.parts) > 1 and source.parts[1] == "metal":
+                  reject(f"Source notebook must not already be under notebooks/metal/: {source}")
+              if source.name.endswith("_colab.ipynb"):
+                  reject(f"Source notebook must not be a Colab notebook: {source}")
+              if not source.exists():
+                  reject(f"Source notebook does not exist: {source}")
+
+              target = validate_notebook_path(target_input, "Target") if target_input else inferred_target_for(source)
+              if len(target.parts) < 2 or target.parts[1] != "metal":
+                  reject(f"Target notebook must be under notebooks/metal/: {target}")
+              targets.append((source, target))
+          else:
+              if target_input:
+                  reject("target_notebook can only be set when source_notebook is also set.")
+              for source in sorted(Path("notebooks").glob("*.ipynb")):
+                  if source.name.endswith("_colab.ipynb"):
+                      continue
+                  target = inferred_target_for(source)
+                  if not target.exists():
+                      targets.append((source, target))
+
+          with targets_path.open("w", encoding="utf-8") as handle:
+              for source, target in targets:
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  handle.write(f"{source}\t{target}\n")
+
+          print(f"Resolved {len(targets)} translation target(s).")
+          for source, target in targets:
+              print(f"{source} -> {target}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"target_count={len(targets)}\n")
+          PY
 
       - name: Build Codex prompt
+        if: ${{ steps.resolve.outputs.target_count != '0' }}
         shell: bash
         env:
-          SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
-          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
           PARITY_COMMAND: ${{ inputs.parity_command }}
         run: |
           set -euo pipefail
@@ -106,15 +137,18 @@ jobs:
 
           {
             printf '\n## Requested Translation\n\n'
-            printf 'Source notebook: `%s`\n' "$SOURCE_NOTEBOOK"
-            printf 'Target notebook: `%s`\n' "$TARGET_NOTEBOOK"
             printf 'Parity command: `%s`\n\n' "${PARITY_COMMAND:-<skipped>}"
-            printf 'Modify `%s` so it is the translated counterpart of `%s`.\n' "$TARGET_NOTEBOOK" "$SOURCE_NOTEBOOK"
+            printf 'Translate each requested source notebook into its target Metal notebook:\n\n'
+            while IFS="$(printf '\t')" read -r source target; do
+              printf -- '- `%s` -> `%s`\n' "$source" "$target"
+            done < .codex-runtime/translation-targets.tsv
+            printf '\nInfer the required Metal changes from the Apple Silicon branch context and existing Metal notebooks.\n'
             printf 'If the translated notebook requires supporting package code, tests, configs, or docs that are missing on this branch, create or port those files too.\n'
             printf 'You may inspect local and remote branches in this full-depth checkout to find the nearest existing implementation, but keep the final diff scoped to the notebook translation and its required dependencies.\n'
           } >> .codex-runtime/notebook-translation.md
 
       - name: Translate notebook
+        if: ${{ steps.resolve.outputs.target_count != '0' }}
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -124,26 +158,34 @@ jobs:
           effort: ${{ inputs.codex_effort }}
 
       - name: Validate notebook JSON
+        if: ${{ steps.resolve.outputs.target_count != '0' }}
         shell: bash
-        env:
-          SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
-          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
         run: |
           set -euo pipefail
 
           python - <<'PY'
           import json
-          import os
 
-          for name in ("SOURCE_NOTEBOOK", "TARGET_NOTEBOOK"):
-              path = os.environ[name]
-              with open(path, encoding="utf-8") as handle:
-                  json.load(handle)
+          with open(".codex-runtime/translation-targets.tsv", encoding="utf-8") as targets:
+              for line in targets:
+                  source, target = line.rstrip("\n").split("\t")
+                  for path in (source, target):
+                      with open(path, encoding="utf-8") as handle:
+                          json.load(handle)
               print(f"Validated notebook JSON: {path}")
           PY
 
+      - name: Run setup command
+        if: ${{ steps.resolve.outputs.target_count != '0' && inputs.setup_command != '' && inputs.parity_command != '' }}
+        shell: bash
+        env:
+          SETUP_COMMAND: ${{ inputs.setup_command }}
+        run: |
+          set -euo pipefail
+          bash -lc "$SETUP_COMMAND"
+
       - name: Run parity command
-        if: ${{ inputs.parity_command != '' }}
+        if: ${{ steps.resolve.outputs.target_count != '0' && inputs.parity_command != '' }}
         shell: bash
         env:
           PARITY_COMMAND: ${{ inputs.parity_command }}
@@ -190,6 +232,7 @@ jobs:
           if-no-files-found: warn
           path: |
             .codex-runtime/codex-final-message.md
+            .codex-runtime/translation-targets.tsv
             .codex-runtime/git-status.txt
             .codex-runtime/notebook-translation.patch
-            ${{ inputs.target_notebook }}
+            notebooks/metal/**/*.ipynb
