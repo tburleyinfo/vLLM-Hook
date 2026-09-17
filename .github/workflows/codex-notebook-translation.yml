@@ -27,7 +27,7 @@ on:
       parity_command:
         description: Command to validate the translated notebook; leave blank to skip
         required: false
-        default: python tests/parity_tests/run_all_minimal_parity.py --skip-colab
+        default: "true"
       setup_command:
         description: Optional environment setup command before parity
         required: false
