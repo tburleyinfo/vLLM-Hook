@@ -13,37 +13,43 @@ from typing import Iterable
 
 KNOWN_COMPONENTS = {
     "attention-tracker": {
-        "markers": ("probe_hook_qk", "attn_tracker", "attention_tracker_analyzer"),
+        "identity_markers": ("attention-tracker", "attention_tracker", "attn_tracker", "attention_tracker_analyzer"),
+        "support_markers": ("probe_hook_qk",),
         "worker": "probe_hookqk_worker.py",
         "analyzer": "attention_tracker_analyzer.py",
         "reviewed_metal": True,
     },
     "core-reranker": {
-        "markers": ("probe_hook_qk", "core_reranker", "core_reranker_analyzer"),
+        "identity_markers": ("core-reranker", "core_reranker", "core_reranker_analyzer"),
+        "support_markers": ("probe_hook_qk",),
         "worker": "probe_hookqk_worker.py",
         "analyzer": "core_reranker_analyzer.py",
         "reviewed_metal": True,
     },
     "activation-steering": {
-        "markers": ("steer_hook_act", "steer_activation_worker", "activation_steer"),
+        "identity_markers": ("activation-steering", "activation_steer"),
+        "support_markers": ("steer_hook_act", "steer_activation_worker"),
         "worker": "steer_activation_worker.py",
         "analyzer": None,
         "reviewed_metal": True,
     },
     "hidden-states": {
-        "markers": ("probe_hidden_states", "hidden_states_analyzer", "hidden_states"),
+        "identity_markers": ("hidden-states", "hidden_states", "hidden_states_analyzer"),
+        "support_markers": ("probe_hidden_states",),
         "worker": "probe_hidden_states_worker.py",
         "analyzer": "hidden_states_analyzer.py",
         "reviewed_metal": True,
     },
     "science-hallucination": {
-        "markers": ("science_hallucination", "science_hallucination_analyzer"),
+        "identity_markers": ("science-hallucination", "science_hallucination", "science_hallucination_analyzer"),
+        "support_markers": ("probe_hidden_states",),
         "worker": "probe_hidden_states_worker.py",
         "analyzer": "science_hallucination_analyzer.py",
         "reviewed_metal": False,
     },
     "spotlight": {
-        "markers": ("probe_spotlight", "spotlight_worker", "generate_with_spotlight"),
+        "identity_markers": ("spotlight", "generate_with_spotlight"),
+        "support_markers": ("probe_spotlight", "spotlight_worker"),
         "worker": "spotlight_worker.py",
         "analyzer": None,
         "reviewed_metal": False,
@@ -105,8 +111,8 @@ def detect_components(text: str, source_path: Path) -> list[ComponentEvidence]:
     found: list[ComponentEvidence] = []
 
     for name, spec in KNOWN_COMPONENTS.items():
-        markers = [name, name.replace("-", "_"), *spec["markers"]]
-        if any(marker.lower() in haystack for marker in markers):
+        identity_markers = spec["identity_markers"]
+        if any(marker.lower() in haystack for marker in identity_markers):
             found.append(
                 ComponentEvidence(
                     name=name,
