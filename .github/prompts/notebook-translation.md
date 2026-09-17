@@ -11,6 +11,12 @@ Use the repository context before editing:
 - Prefer the existing notebook, example, worker, analyzer, and config patterns.
 - Keep edits scoped to the translated notebook and directly required supporting
   documentation or config references.
+- Read `.codex-runtime/source-notebook.ipynb` as the immutable source notebook
+  from the source branch when the requested source path is not present in the
+  checked-out target branch.
+- Read `.codex-runtime/notebook-translation-classification.md` before editing
+  and preserve its complexity, confidence, reasons, and review caveat in your
+  final response.
 
 Translation expectations:
 

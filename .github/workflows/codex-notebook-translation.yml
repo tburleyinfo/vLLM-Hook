@@ -1,4 +1,4 @@
-name: Codex Notebook Translation
+name: Copilot Notebook Translation
 
 on:
   workflow_dispatch:
@@ -11,6 +11,19 @@ on:
         description: Target notebook to create or refresh
         required: true
         default: notebooks/metal/demo_spotlight_metal.ipynb
+      target_branch:
+        description: Target branch to check out and edit
+        required: true
+        default: main
+      target_platform:
+        description: Target platform for classification and prompt context
+        required: true
+        type: choice
+        options:
+          - metal
+          - colab
+          - vllm
+        default: metal
       parity_command:
         description: Command to validate the translated notebook; leave blank to skip
         required: false
@@ -23,45 +36,48 @@ on:
         description: Runner label; use a self-hosted Metal runner for Metal parity
         required: true
         default: macos-latest
-      codex_effort:
-        description: Codex reasoning effort
-        required: true
-        default: high
 
 permissions:
   contents: read
+  copilot-requests: write
 
 concurrency:
-  group: codex-notebook-translation-${{ github.ref }}-${{ inputs.target_notebook }}
+  group: copilot-notebook-translation-${{ inputs.target_branch }}-${{ inputs.target_notebook }}
   cancel-in-progress: false
 
 jobs:
   translate:
-    name: Translate notebook with Codex
+    name: Translate notebook with Copilot
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 120
 
     steps:
-      - name: Check out repository
+      - name: Check out target branch
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_branch }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+
+      - name: Install Copilot CLI
+        shell: bash
+        run: npm install -g @github/copilot
+
       - name: Validate requested paths
         shell: bash
         env:
           SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
           TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
         run: |
           set -euo pipefail
-
-          if [ ! -f "$SOURCE_NOTEBOOK" ]; then
-            echo "Source notebook does not exist: $SOURCE_NOTEBOOK" >&2
-            exit 1
-          fi
 
           case "$SOURCE_NOTEBOOK" in
             notebooks/*.ipynb) ;;
@@ -79,7 +95,24 @@ jobs:
               ;;
           esac
 
+          if [ -z "$TARGET_BRANCH" ]; then
+            echo "Target branch is required" >&2
+            exit 1
+          fi
+
           mkdir -p "$(dirname "$TARGET_NOTEBOOK")"
+
+      - name: Retrieve source notebook from main
+        shell: bash
+        env:
+          SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
+          SOURCE_BRANCH: main
+        run: |
+          set -euo pipefail
+
+          mkdir -p .codex-runtime
+          git fetch --no-tags origin "$SOURCE_BRANCH"
+          git show "origin/${SOURCE_BRANCH}:${SOURCE_NOTEBOOK}" > .codex-runtime/source-notebook.ipynb
 
       - name: Run setup command
         if: ${{ inputs.setup_command != '' }}
@@ -90,34 +123,74 @@ jobs:
           set -euo pipefail
           bash -lc "$SETUP_COMMAND"
 
-      - name: Build Codex prompt
+      - name: Classify translation risk
+        shell: bash
+        env:
+          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          TARGET_PLATFORM: ${{ inputs.target_platform }}
+          SOURCE_BRANCH: main
+        run: |
+          set -euo pipefail
+
+          python .github/scripts/classify_notebook_translation.py \
+            --source-notebook .codex-runtime/source-notebook.ipynb \
+            --target-notebook "$TARGET_NOTEBOOK" \
+            --source-branch "$SOURCE_BRANCH" \
+            --target-branch "$TARGET_BRANCH" \
+            --target-platform "$TARGET_PLATFORM" \
+            --output-json .codex-runtime/notebook-translation-classification.json \
+            --output-markdown .codex-runtime/notebook-translation-classification.md
+
+          cat .codex-runtime/notebook-translation-classification.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build Copilot prompt
         shell: bash
         env:
           SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
           TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+          TARGET_BRANCH: ${{ inputs.target_branch }}
+          TARGET_PLATFORM: ${{ inputs.target_platform }}
+          SOURCE_BRANCH: main
           PARITY_COMMAND: ${{ inputs.parity_command }}
         run: |
           set -euo pipefail
 
           mkdir -p .codex-runtime
-          cp .github/prompts/notebook-translation.md .codex-runtime/notebook-translation.md
+          cp .github/prompts/notebook-translation.md .codex-runtime/copilot-notebook-translation.md
 
           {
             printf '\n## Requested Translation\n\n'
-            printf 'Source notebook: `%s`\n' "$SOURCE_NOTEBOOK"
-            printf 'Target notebook: `%s`\n' "$TARGET_NOTEBOOK"
+            printf 'Source notebook: `%s` from `%s` (copied to `.codex-runtime/source-notebook.ipynb`)\n' "$SOURCE_NOTEBOOK" "$SOURCE_BRANCH"
+            printf 'Target notebook: `%s` on `%s`\n' "$TARGET_NOTEBOOK" "$TARGET_BRANCH"
+            printf 'Target platform: `%s`\n' "$TARGET_PLATFORM"
             printf 'Parity command: `%s`\n\n' "${PARITY_COMMAND:-<skipped>}"
             printf 'Modify `%s` so it is the translated counterpart of `%s`.\n' "$TARGET_NOTEBOOK" "$SOURCE_NOTEBOOK"
-          } >> .codex-runtime/notebook-translation.md
+            printf '\n## MLR-1 Classification Context\n\n'
+            cat .codex-runtime/notebook-translation-classification.md
+          } >> .codex-runtime/copilot-notebook-translation.md
 
       - name: Translate notebook
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          prompt-file: .codex-runtime/notebook-translation.md
-          output-file: .codex-runtime/codex-final-message.md
-          permission-profile: ":workspace"
-          effort: ${{ inputs.codex_effort }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "${COPILOT_GITHUB_TOKEN:-}" ]; then
+            export GITHUB_TOKEN="$COPILOT_GITHUB_TOKEN"
+          fi
+
+          copilot -p "$(cat .codex-runtime/copilot-notebook-translation.md)" \
+            -s \
+            --available-tools='bash,edit,view,grep,glob' \
+            --allow-tool='write' \
+            --allow-tool='shell(git diff:*)' \
+            --allow-tool='shell(git status:*)' \
+            --allow-tool='shell(python:*)' \
+            --allow-tool='shell(python3:*)' \
+            --no-ask-user | tee .codex-runtime/copilot-final-message.md
 
       - name: Validate notebook JSON
         shell: bash
@@ -131,8 +204,8 @@ jobs:
           import os
           import nbformat
 
-          for name in ("SOURCE_NOTEBOOK", "TARGET_NOTEBOOK"):
-              path = os.environ[name]
+          paths = [".codex-runtime/source-notebook.ipynb", os.environ["TARGET_NOTEBOOK"]]
+          for path in paths:
               with open(path, encoding="utf-8") as handle:
                   nbformat.read(handle, as_version=4)
               print(f"Validated notebook JSON: {path}")
@@ -161,7 +234,7 @@ jobs:
           git diff --binary > .codex-runtime/notebook-translation.patch
 
           {
-            echo "## Codex Notebook Translation"
+            echo "## Copilot Notebook Translation"
             echo
             echo "### Status"
             echo
@@ -171,17 +244,21 @@ jobs:
             echo
             echo "### Patch"
             echo
-            echo "Download the workflow artifact named \`codex-notebook-translation\` and review \`notebook-translation.patch\`."
+            echo "Download the workflow artifact named \`copilot-notebook-translation\` and review \`notebook-translation.patch\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload translation artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: codex-notebook-translation
+          name: copilot-notebook-translation
           if-no-files-found: warn
           path: |
-            .codex-runtime/codex-final-message.md
+            .codex-runtime/copilot-final-message.md
+            .codex-runtime/copilot-notebook-translation.md
+            .codex-runtime/notebook-translation-classification.json
+            .codex-runtime/notebook-translation-classification.md
+            .codex-runtime/source-notebook.ipynb
             .codex-runtime/git-status.txt
             .codex-runtime/notebook-translation.patch
             ${{ inputs.target_notebook }}
