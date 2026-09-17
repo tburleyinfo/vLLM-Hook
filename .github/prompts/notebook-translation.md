@@ -6,8 +6,8 @@ source notebook's intent, execution order, and user-facing explanation.
 Use the repository context before editing:
 
 - Read the source notebook and any existing target notebook.
-- Read the relevant setup documentation in `notebooks/README.md`,
-  `notebooks/metal/README.md`, and `tests/parity_tests/README.md`.
+- Read the relevant setup documentation in `notebooks/README.md` and
+  `tests/parity_tests/README.md`.
 - Prefer the existing notebook, example, worker, analyzer, and config patterns.
 - Keep edits scoped to the translated notebook and directly required supporting
   documentation or config references.
@@ -17,12 +17,14 @@ Use the repository context before editing:
 - Read `.codex-runtime/notebook-translation-classification.md` before editing
   and preserve its complexity, confidence, reasons, and review caveat in your
   final response.
+- Do not invent or rewrite the Colab dependency setup cell. The workflow will
+  deterministically inject `notebooks/snippets/colab_setup.py` after generation.
 
 Translation expectations:
 
 - Preserve the source notebook's logical sections and demo flow.
 - Adapt imports, backend classes, worker names, analyzer names, model defaults,
-  config paths, and runtime assumptions to the target platform.
+  config paths, and runtime assumptions to Colab.
 - Keep notebook cells deterministic where the repository already does so.
 - Do not commit, push, open a pull request, or expose secrets.
 - If parity cannot be made runnable in the workflow environment, leave a clear

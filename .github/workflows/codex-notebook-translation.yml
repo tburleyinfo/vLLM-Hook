@@ -8,22 +8,13 @@ on:
         required: true
         default: notebooks/demo_spotlight.ipynb
       target_notebook:
-        description: Target notebook to create or refresh
+        description: Colab notebook to create or refresh
         required: true
-        default: notebooks/metal/demo_spotlight_metal.ipynb
+        default: notebooks/demo_spotlight_colab.ipynb
       target_branch:
-        description: Target branch to check out and edit
+        description: Branch containing the target notebook
         required: true
         default: main
-      target_platform:
-        description: Target platform for classification and prompt context
-        required: true
-        type: choice
-        options:
-          - metal
-          - colab
-          - vllm
-        default: metal
       parity_command:
         description: Command to validate the translated notebook; leave blank to skip
         required: false
@@ -33,7 +24,7 @@ on:
         required: false
         default: python -m pip install nbformat pytest
       runner:
-        description: Runner label; use a self-hosted Metal runner for Metal parity
+        description: Runner label
         required: true
         default: macos-latest
 
@@ -95,6 +86,18 @@ jobs:
               ;;
           esac
 
+          case "$TARGET_NOTEBOOK" in
+            notebooks/*/*)
+              echo "Target Colab notebook must live directly under notebooks/: $TARGET_NOTEBOOK" >&2
+              exit 1
+              ;;
+            notebooks/*_colab.ipynb) ;;
+            *)
+              echo "Target notebook must be a Colab notebook named notebooks/*_colab.ipynb: $TARGET_NOTEBOOK" >&2
+              exit 1
+              ;;
+          esac
+
           if [ -z "$TARGET_BRANCH" ]; then
             echo "Target branch is required" >&2
             exit 1
@@ -128,7 +131,6 @@ jobs:
         env:
           TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
-          TARGET_PLATFORM: ${{ inputs.target_platform }}
           SOURCE_BRANCH: main
         run: |
           set -euo pipefail
@@ -138,7 +140,6 @@ jobs:
             --target-notebook "$TARGET_NOTEBOOK" \
             --source-branch "$SOURCE_BRANCH" \
             --target-branch "$TARGET_BRANCH" \
-            --target-platform "$TARGET_PLATFORM" \
             --output-json .codex-runtime/notebook-translation-classification.json \
             --output-markdown .codex-runtime/notebook-translation-classification.md
 
@@ -150,7 +151,6 @@ jobs:
           SOURCE_NOTEBOOK: ${{ inputs.source_notebook }}
           TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
           TARGET_BRANCH: ${{ inputs.target_branch }}
-          TARGET_PLATFORM: ${{ inputs.target_platform }}
           SOURCE_BRANCH: main
           PARITY_COMMAND: ${{ inputs.parity_command }}
         run: |
@@ -163,7 +163,7 @@ jobs:
             printf '\n## Requested Translation\n\n'
             printf 'Source notebook: `%s` from `%s` (copied to `.codex-runtime/source-notebook.ipynb`)\n' "$SOURCE_NOTEBOOK" "$SOURCE_BRANCH"
             printf 'Target notebook: `%s` on `%s`\n' "$TARGET_NOTEBOOK" "$TARGET_BRANCH"
-            printf 'Target platform: `%s`\n' "$TARGET_PLATFORM"
+            printf 'Target platform: `colab`\n'
             printf 'Parity command: `%s`\n\n' "${PARITY_COMMAND:-<skipped>}"
             printf 'Modify `%s` so it is the translated counterpart of `%s`.\n' "$TARGET_NOTEBOOK" "$SOURCE_NOTEBOOK"
             printf '\n## MLR-1 Classification Context\n\n'
@@ -191,6 +191,17 @@ jobs:
             --allow-tool='shell(python:*)' \
             --allow-tool='shell(python3:*)' \
             --no-ask-user | tee .codex-runtime/copilot-final-message.md
+
+      - name: Apply canonical Colab setup cell
+        shell: bash
+        env:
+          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+        run: |
+          set -euo pipefail
+
+          python .github/scripts/apply_colab_setup_cell.py \
+            --notebook "$TARGET_NOTEBOOK" \
+            --template notebooks/snippets/colab_setup.py
 
       - name: Validate notebook JSON
         shell: bash
