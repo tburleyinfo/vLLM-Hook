@@ -121,7 +121,7 @@ jobs:
           SETUP_COMMAND: ${{ inputs.setup_command }}
         run: |
           set -euo pipefail
-          bash -lc "$SETUP_COMMAND"
+          eval "$SETUP_COMMAND"
 
       - name: Classify translation risk
         shell: bash
