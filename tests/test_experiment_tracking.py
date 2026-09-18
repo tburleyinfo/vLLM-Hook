@@ -18,6 +18,10 @@ from research.experiment_tracking.gpu_preflight import (
     required_vram_bytes,
 )
 from research.experiment_tracking.mlr20 import log_mlr20_results_sequentially
+from research.experiment_tracking.mlr20 import (
+    evaluate_mlr20_condition,
+    run_mlr20_batch,
+)
 from research.experiment_tracking.wandb_adapter import WandbTracker
 
 
@@ -356,6 +360,83 @@ def test_mlr20_sequential_logging_rejects_duplicate_condition_runs():
         )
 
 
+def test_mlr20_single_condition_evaluator_is_independently_callable():
+    condition = mlr20_alpha_sweep_conditions(
+        temperature=0.0,
+        max_tokens=64,
+        history_window_messages=16,
+    )[1]
+    FakeLLM.instances_created = 0
+    llm = FakeLLM()
+
+    result = evaluate_mlr20_condition(
+        condition=condition,
+        llm=llm,
+        sampling_params=FakeSamplingParams(temperature=0.0, max_tokens=64),
+        seed_history=[],
+        user_turns=["Turn one", "Turn two"],
+        render_prompt=_render_test_prompt,
+        score_fn=_simple_eprime_score,
+        generate_with_spotlight_fn=_fake_generate_with_spotlight,
+        spotlight_span="constraint",
+        provenance={"git_sha": "abc123"},
+    )
+
+    assert result.condition.condition_id == "A1"
+    assert [turn.turn for turn in result.turns] == [1, 2]
+    assert llm.baseline_calls == 0
+    assert llm.spotlight_calls == 2
+    assert result.provenance["git_sha"] == "abc123"
+
+
+def test_mlr20_batch_reuses_engine_and_isolates_condition_histories():
+    conditions = mlr20_alpha_sweep_conditions(
+        temperature=0.0,
+        max_tokens=64,
+        history_window_messages=16,
+    )[:2]
+    FakeLLM.instances_created = 0
+    llm = FakeLLM()
+
+    results = run_mlr20_batch(
+        conditions,
+        llm=llm,
+        sampling_params=FakeSamplingParams(temperature=0.0, max_tokens=64),
+        seed_history=[],
+        user_turns=["First", "Second"],
+        render_prompt=_render_test_prompt,
+        score_fn=_simple_eprime_score,
+        generate_with_spotlight_fn=_fake_generate_with_spotlight,
+        spotlight_span="constraint",
+    )
+
+    assert [result.condition.condition_id for result in results] == ["A0", "A1"]
+    assert llm.instances_created == 1
+    assert llm.baseline_calls == 2
+    assert llm.spotlight_calls == 2
+    assert results[0].turns[0].condition == "A0"
+    assert results[1].turns[0].condition == "A1"
+    assert "baseline reply 1" in results[0].turns[1].extra["prompt"]
+    assert "baseline reply" not in results[1].turns[0].extra["prompt"]
+
+
+def test_mlr20_batch_rejects_duplicate_condition_runs_before_logging():
+    condition = sample_condition()
+
+    with pytest.raises(ValueError, match="duplicate condition"):
+        run_mlr20_batch(
+            [condition, condition],
+            llm=FakeLLM(),
+            sampling_params=FakeSamplingParams(temperature=0.0, max_tokens=64),
+            seed_history=[],
+            user_turns=["First"],
+            render_prompt=_render_test_prompt,
+            score_fn=_simple_eprime_score,
+            generate_with_spotlight_fn=_fake_generate_with_spotlight,
+            spotlight_span="constraint",
+        )
+
+
 def test_gpu_preflight_reservation_calculation():
     total = 80 * 1024**3
     required = required_vram_bytes(total, 0.30)
@@ -492,3 +573,49 @@ def _simple_eprime_score(text):
         "e_prime_violation_count": violation_count,
         "e_prime_retained": violation_count == 0,
     }
+
+
+class FakeSamplingParams:
+    def __init__(self, temperature, max_tokens):
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+
+class FakeGeneration:
+    def __init__(self, text):
+        self.outputs = [type("Output", (), {"text": text})()]
+
+
+class FakeLLM:
+    instances_created = 0
+
+    def __init__(self):
+        type(self).instances_created += 1
+        self.baseline_calls = 0
+        self.spotlight_calls = 0
+
+    def generate(self, *, prompts, sampling_params, use_hook):
+        assert use_hook is False
+        self.baseline_calls += 1
+        return [FakeGeneration(f"{prompts[0]} baseline reply {self.baseline_calls}")]
+
+
+def _fake_generate_with_spotlight(
+    llm,
+    *,
+    prompts,
+    emph_strings,
+    alpha,
+    sampling_params,
+):
+    assert emph_strings == ["constraint"]
+    assert alpha is not None
+    llm.spotlight_calls += 1
+    return [FakeGeneration(f"{prompts[0]} spotlight reply {llm.spotlight_calls}")]
+
+
+def _render_test_prompt(history, user_message):
+    transcript = "\n".join(
+        f"{item['role'].upper()}: {item['content']}" for item in history
+    )
+    return f"{transcript}\nUSER: {user_message}\nASSISTANT:".strip()

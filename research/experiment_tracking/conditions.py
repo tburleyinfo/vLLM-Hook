@@ -11,11 +11,46 @@ MLR20_TURNS = 10
 MLR20_REPLICATE = 1
 
 _MLR20_ALPHA_SWEEP_ROWS = (
-    ("A0", False, None, "baseline"),
-    ("A1", True, 0.05, "spotlight"),
-    ("A2", True, 0.10, "spotlight"),
-    ("A3", True, 0.15, "spotlight"),
-    ("A4", True, 0.20, "spotlight"),
+    (
+        "A0",
+        "A0 Baseline control",
+        "https://app.notion.com/3df5023b4c7881209056dc93108a4431",
+        False,
+        None,
+        "baseline",
+    ),
+    (
+        "A1",
+        "A1 Spotlight α=0.05",
+        "https://app.notion.com/3df5023b4c7881d8aac6c230109f13a9",
+        True,
+        0.05,
+        "spotlight",
+    ),
+    (
+        "A2",
+        "A2 Spotlight α=0.10",
+        "https://app.notion.com/3df5023b4c78812593e6d0747d58fe15",
+        True,
+        0.10,
+        "spotlight",
+    ),
+    (
+        "A3",
+        "A3 Spotlight α=0.15",
+        "https://app.notion.com/3df5023b4c78819aa4c1d3a04d59f6ac",
+        True,
+        0.15,
+        "spotlight",
+    ),
+    (
+        "A4",
+        "A4 Spotlight α=0.20 checkpoint",
+        "https://app.notion.com/3df5023b4c788165880ff30bcb397089",
+        True,
+        0.20,
+        "spotlight",
+    ),
 )
 
 
@@ -33,6 +68,12 @@ def mlr20_alpha_sweep_conditions(
     W&B run. Baseline and Spotlight rows are intentionally not combined.
     """
 
+    common_extra = {
+        "design_matrix_source": "Notion Experimental Design Matrix",
+        "design_matrix_url": MLR20_NOTION_MATRIX_URL,
+        "design_matrix_id": MLR20_NOTION_MATRIX_ID,
+        "aggregation": "Global aggregation",
+    }
     common = {
         "comparison_group": MLR20_COMPARISON_GROUP,
         "model": MLR20_MODEL,
@@ -48,12 +89,6 @@ def mlr20_alpha_sweep_conditions(
         "seed": seed,
         "notebook": notebook,
         "tags": ("MLR-20", "alpha-sweep", "notion-design-matrix"),
-        "extra": {
-            "design_matrix_source": "Notion Experimental Design Matrix",
-            "design_matrix_url": MLR20_NOTION_MATRIX_URL,
-            "design_matrix_id": MLR20_NOTION_MATRIX_ID,
-            "aggregation": "Global aggregation",
-        },
     }
 
     return [
@@ -62,9 +97,27 @@ def mlr20_alpha_sweep_conditions(
             spotlight=spotlight,
             alpha=alpha,
             implementation=implementation,
+            extra={
+                **common_extra,
+                "notion_experiment": experiment,
+                "notion_row_url": notion_row_url,
+                "notion_model": "Qwen2-1.5B-Instruct",
+                "notion_comparison_group": "A — Alpha sweep",
+                "notion_spotlight": "On" if spotlight else "Off",
+                "notion_intervention_timing": "Prefill",
+                "notion_history": "Self-propagating",
+                "notion_implementation": "Global aggregation",
+            },
             **common,
         )
-        for condition_id, spotlight, alpha, implementation in _MLR20_ALPHA_SWEEP_ROWS
+        for (
+            condition_id,
+            experiment,
+            notion_row_url,
+            spotlight,
+            alpha,
+            implementation,
+        ) in _MLR20_ALPHA_SWEEP_ROWS
     ]
 
 
