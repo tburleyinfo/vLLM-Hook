@@ -231,6 +231,20 @@ jobs:
           set -euo pipefail
           bash -lc "$PARITY_COMMAND"
 
+      - name: Prepare translated notebook artifact
+        if: ${{ always() }}
+        shell: bash
+        env:
+          TARGET_NOTEBOOK: ${{ inputs.target_notebook }}
+        run: |
+          set -euo pipefail
+
+          python .github/scripts/apply_colab_setup_cell.py \
+            --notebook "$TARGET_NOTEBOOK" \
+            --template notebooks/snippets/colab_setup.py \
+            --verify-only
+          cp "$TARGET_NOTEBOOK" .codex-runtime/translated-notebook.ipynb
+
       - name: Collect translation diff
         if: ${{ always() }}
         shell: bash
@@ -270,6 +284,7 @@ jobs:
             .codex-runtime/notebook-translation-classification.json
             .codex-runtime/notebook-translation-classification.md
             .codex-runtime/source-notebook.ipynb
+            .codex-runtime/translated-notebook.ipynb
             .codex-runtime/git-status.txt
             .codex-runtime/notebook-translation.patch
             ${{ inputs.target_notebook }}
