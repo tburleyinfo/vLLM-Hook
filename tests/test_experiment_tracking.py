@@ -6,6 +6,10 @@ from research.experiment_tracking import (
 )
 from research.experiment_tracking.conditions import alpha_sweep_conditions
 from research.experiment_tracking.eprime import turn_result_from_eprime_texts
+from research.experiment_tracking.gpu_preflight import (
+    has_required_vram,
+    required_vram_bytes,
+)
 from research.experiment_tracking.wandb_adapter import WandbTracker
 
 
@@ -182,6 +186,23 @@ def test_alpha_sweep_conditions_avoid_invalid_factorial_combinations():
     assert by_id["A1"].spotlight is True
     assert by_id["A1"].alpha == 0.05
     assert by_id["A4"].alpha == 0.20
+
+
+def test_gpu_preflight_reservation_calculation():
+    total = 80 * 1024**3
+    required = required_vram_bytes(total, 0.30)
+
+    assert required == int(total * 0.30)
+    assert has_required_vram(
+        free_bytes=required,
+        total_bytes=total,
+        gpu_memory_utilization=0.30,
+    )
+    assert not has_required_vram(
+        free_bytes=required - 1,
+        total_bytes=total,
+        gpu_memory_utilization=0.30,
+    )
 
 
 def test_eprime_tracking_ignores_user_message_violations():
