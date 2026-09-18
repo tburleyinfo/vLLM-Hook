@@ -68,7 +68,8 @@ class ApplyColabSetupCellTest(unittest.TestCase):
             self.assertEqual(len(setup_cells), 1)
             setup_source = apply_colab_setup_cell.cell_source(setup_cells[0])
             self.assertEqual(setup_source, canonical)
-            self.assertIn('"pillow==11.3.0"', setup_source)
+            self.assertIn("VLLM_HOOK_REPO_URL", setup_source)
+            self.assertIn("VLLM_HOOK_REPO_BRANCH", setup_source)
             self.assertNotIn('print("old setup")', artifact_path.read_text(encoding="utf-8"))
 
             setup_index = result["cells"].index(setup_cells[0])
