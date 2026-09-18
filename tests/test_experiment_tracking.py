@@ -6,6 +6,7 @@ from research.experiment_tracking import (
 )
 from research.experiment_tracking.conditions import alpha_sweep_conditions
 from research.experiment_tracking.eprime import turn_result_from_eprime_texts
+from research.experiment_tracking.eprime import extract_current_assistant_response
 from research.experiment_tracking.gpu_preflight import (
     has_required_vram,
     required_vram_bytes,
@@ -91,6 +92,26 @@ def test_disabled_wandb_tracker_returns_complete_payload():
     assert payload["turns"][0]["prompt"] == "Answer without state-of-being verbs."
     assert payload["turns"][0]["model_response"] == "Use active phrasing."
     assert payload["full_result"]["transcript"]
+
+
+def test_turn_result_preserves_full_prompt_and_current_user_message():
+    turn = TurnResult(
+        condition="spotlight",
+        turn=1,
+        prompt="SYSTEM\nASSISTANT: Prior text is context.\nUSER: Current turn\nASSISTANT:",
+        user_message="Current turn",
+        response="Use active phrasing.",
+        compliant=True,
+        violation_count=0,
+        state_of_being_count=0,
+        contraction_count=0,
+    )
+
+    row = turn.to_row()
+
+    assert row["prompt"].startswith("SYSTEM")
+    assert row["user_message"] == "Current turn"
+    assert row["model_response"] == "Use active phrasing."
 
 
 def test_enabled_wandb_tracker_emits_run_table_metrics_and_artifact():
@@ -222,6 +243,28 @@ def test_eprime_tracking_ignores_user_message_violations():
     assert turn.contraction_count == 0
 
 
+def test_eprime_tracking_ignores_prompt_history_violations():
+    prompt = "SYSTEM\nUSER: Earlier text is noisy.\nASSISTANT: It was verbose.\nUSER: Rewrite this."
+    assistant_response = extract_current_assistant_response(
+        f"{prompt}\nASSISTANT: Use concise active phrasing.",
+        prompt,
+    )
+    turn = turn_result_from_eprime_texts(
+        condition="spotlight",
+        turn=1,
+        user_message="Rewrite this.",
+        assistant_response=assistant_response,
+        score_fn=_simple_eprime_score,
+        extra={"prompt": prompt},
+    )
+
+    assert turn.response == "Use concise active phrasing."
+    assert turn.compliant is True
+    assert turn.violation_count == 0
+    assert turn.state_of_being_count == 0
+    assert turn.contraction_count == 0
+
+
 def test_eprime_tracking_counts_assistant_response_violations():
     turn = turn_result_from_eprime_texts(
         condition="spotlight",
@@ -237,6 +280,53 @@ def test_eprime_tracking_counts_assistant_response_violations():
     assert turn.violation_count == 1
     assert turn.state_of_being_count == 1
     assert turn.contraction_count == 0
+
+
+def test_aggregate_eprime_metrics_use_extracted_current_assistant_response_only():
+    prompt_with_violations = "SYSTEM\nUSER: There is context.\nASSISTANT: It was context.\nUSER: Current"
+    clean_response = extract_current_assistant_response(
+        f"{prompt_with_violations}\nASSISTANT: Use active phrasing.",
+        prompt_with_violations,
+    )
+    violating_response = extract_current_assistant_response(
+        f"{prompt_with_violations}\nASSISTANT: This is concise.",
+        prompt_with_violations,
+    )
+    turns = [
+        turn_result_from_eprime_texts(
+            condition="spotlight",
+            turn=1,
+            user_message="Current",
+            assistant_response=clean_response,
+            score_fn=_simple_eprime_score,
+        ),
+        turn_result_from_eprime_texts(
+            condition="spotlight",
+            turn=2,
+            user_message="Current",
+            assistant_response=violating_response,
+            score_fn=_simple_eprime_score,
+        ),
+    ]
+
+    metrics = RunMetrics.from_turns(turns)
+
+    assert metrics.compliance_rate == 0.5
+    assert metrics.mean_violations == 0.5
+    assert metrics.total_violations == 1
+    assert metrics.mean_state_of_being_count == 0.5
+    assert metrics.total_contractions == 0
+
+
+def test_extract_current_assistant_response_removes_prompt_echo_and_transcript_markers():
+    prompt = "SYSTEM\nUSER: Prior question is here.\nASSISTANT: Prior reply was here.\nUSER: Current turn\nASSISTANT:"
+    raw_generation = f"{prompt} Use active phrasing.\nUSER: Follow-up leaked."
+
+    response = extract_current_assistant_response(raw_generation, prompt)
+
+    assert response == "Use active phrasing."
+    assert "USER:" not in response
+    assert "Prior reply" not in response
 
 
 def _simple_eprime_score(text):

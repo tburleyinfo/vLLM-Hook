@@ -3,9 +3,31 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
 from typing import Any, Mapping
 
 from research.experiment_tracking.schemas import TurnResult
+
+
+_NEXT_TURN_RE = re.compile(r"\n(?:USER|ASSISTANT):")
+
+
+def extract_current_assistant_response(generated_text: str, prompt: str) -> str:
+    """Extract only the newly generated assistant text from raw generation output."""
+
+    text = generated_text or ""
+    if prompt and text.startswith(prompt):
+        text = text[len(prompt) :]
+
+    text = text.lstrip()
+    if text.startswith("ASSISTANT:"):
+        text = text[len("ASSISTANT:") :].lstrip()
+
+    next_turn = _NEXT_TURN_RE.search(text)
+    if next_turn:
+        text = text[: next_turn.start()]
+
+    return text.strip().split("\n\n")[0].strip()
 
 
 def turn_result_from_eprime_row(row: Mapping[str, Any]) -> TurnResult:
@@ -18,7 +40,8 @@ def turn_result_from_eprime_row(row: Mapping[str, Any]) -> TurnResult:
     return TurnResult(
         condition=str(row["condition"]),
         turn=int(row["turn"]),
-        prompt=str(row["user_message"]),
+        prompt=str(row.get("prompt", row["user_message"])),
+        user_message=str(row["user_message"]),
         response=str(row["reply"]),
         compliant=bool(row["e_prime_retained"]),
         violation_count=int(row["e_prime_violation_count"]),
@@ -54,6 +77,7 @@ def turn_result_from_assistant_score(
         condition=condition,
         turn=turn,
         prompt=user_message,
+        user_message=user_message,
         response=assistant_response,
         compliant=bool(score["e_prime_retained"]),
         violation_count=int(score["e_prime_violation_count"]),

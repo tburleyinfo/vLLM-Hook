@@ -72,6 +72,7 @@ class TurnResult:
     violation_count: int
     state_of_being_count: int
     contraction_count: int
+    user_message: str | None = None
     extra: Mapping[str, Any] = field(default_factory=dict)
 
     def to_row(self) -> dict[str, Any]:
@@ -79,7 +80,7 @@ class TurnResult:
             "condition": self.condition,
             "turn": self.turn,
             "prompt": self.prompt,
-            "user_message": self.prompt,
+            "user_message": self.user_message if self.user_message is not None else self.prompt,
             "model_response": self.response,
             "compliant": self.compliant,
             "violation_count": self.violation_count,
@@ -191,4 +192,3 @@ def _module_version(name: str) -> str:
 def _spotlight_version(repo_root: str | Path | None) -> str:
     sha = _git_sha(repo_root)
     return sha if sha != UNKNOWN else UNKNOWN
-

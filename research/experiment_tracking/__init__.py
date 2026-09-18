@@ -8,6 +8,7 @@ from research.experiment_tracking.schemas import (
     collect_runtime_provenance,
 )
 from research.experiment_tracking.eprime import (
+    extract_current_assistant_response,
     turn_result_from_assistant_score,
     turn_result_from_eprime_row,
     turn_result_from_eprime_texts,
@@ -26,6 +27,7 @@ __all__ = [
     "TurnResult",
     "WandbTracker",
     "collect_runtime_provenance",
+    "extract_current_assistant_response",
     "turn_result_from_assistant_score",
     "turn_result_from_eprime_row",
     "turn_result_from_eprime_texts",
