@@ -124,10 +124,10 @@ if IN_COLAB:
         print("vLLM 0.19.0 was not installable for this Colab runtime; falling back to the latest supported 0.18.x wheel.")
         run(vllm_install_base + ["vllm>=0.14,<0.19"])
 
-    # Torchvision imports Pillow during vLLM/Transformers initialization. Colab
-    # images can end up with mixed PIL files after large dependency changes in a
-    # live kernel, so force a coherent Pillow install before validation imports.
-    run([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-cache-dir", "pillow>=10.0"])
+    # Torchvision imports Pillow during vLLM/Transformers initialization. Keep
+    # Pillow pinned so Image.py and the compiled _imaging extension come from
+    # the same wheel in Colab's live kernel.
+    run([sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-cache-dir", "pillow==11.3.0"])
     for module_name in list(sys.modules):
         if module_name == "PIL" or module_name.startswith("PIL."):
             del sys.modules[module_name]

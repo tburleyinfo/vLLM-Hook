@@ -66,7 +66,9 @@ class ApplyColabSetupCellTest(unittest.TestCase):
                 if cell["cell_type"] == "code" and MARKER in apply_colab_setup_cell.cell_source(cell)
             ]
             self.assertEqual(len(setup_cells), 1)
-            self.assertEqual(apply_colab_setup_cell.cell_source(setup_cells[0]), canonical)
+            setup_source = apply_colab_setup_cell.cell_source(setup_cells[0])
+            self.assertEqual(setup_source, canonical)
+            self.assertIn('"pillow==11.3.0"', setup_source)
             self.assertNotIn('print("old setup")', artifact_path.read_text(encoding="utf-8"))
 
             setup_index = result["cells"].index(setup_cells[0])
