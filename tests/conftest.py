@@ -3,12 +3,13 @@ import os
 import sys
 import json
 import multiprocessing as mp
+import importlib.util
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
-pytest.importorskip("vllm")
+HAS_VLLM = importlib.util.find_spec("vllm") is not None
 
 mp.set_start_method("spawn", force=True)
 os.environ["VLLM_USE_V1"] = "1"
@@ -37,6 +38,12 @@ def cache_dir(cache_root: Path, request) -> Path:
     sub = cache_root / request.node.name
     sub.mkdir(parents=True, exist_ok=True)
     return sub
+
+
+def pytest_ignore_collect(collection_path, config):
+    if HAS_VLLM:
+        return False
+    return "tests/use_cases" in str(collection_path)
 
 
 ConfigKind = Literal[

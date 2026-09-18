@@ -1,0 +1,183 @@
+from research.experiment_tracking import (
+    ExperimentCondition,
+    ExperimentResult,
+    RunMetrics,
+    TurnResult,
+)
+from research.experiment_tracking.conditions import alpha_sweep_conditions
+from research.experiment_tracking.wandb_adapter import WandbTracker
+
+
+def sample_condition():
+    return ExperimentCondition(
+        condition_id="A2",
+        comparison_group="MLR-20-A-alpha-sweep",
+        spotlight=True,
+        alpha=0.10,
+        implementation="spotlight",
+        model="Qwen/Qwen2-1.5B-Instruct",
+        constraint_formulation="E-Prime",
+        constraint_complexity="state-of-being-verbs-and-listed-contractions",
+        intervention_timing="prefill",
+        history="rolling-long-conversation",
+        turns=2,
+        replicate=1,
+        temperature=0.0,
+        max_tokens=128,
+        history_window_messages=16,
+        seed=0,
+        notebook="notebooks/demo_spotlight_e_prime_colab.ipynb",
+    )
+
+
+def sample_result():
+    turns = [
+        TurnResult(
+            condition="A2",
+            turn=1,
+            prompt="Answer without state-of-being verbs.",
+            response="Use active phrasing.",
+            compliant=True,
+            violation_count=0,
+            state_of_being_count=0,
+            contraction_count=0,
+        ),
+        TurnResult(
+            condition="A2",
+            turn=2,
+            prompt="Continue.",
+            response="It is concise.",
+            compliant=False,
+            violation_count=1,
+            state_of_being_count=1,
+            contraction_count=0,
+        ),
+    ]
+    return ExperimentResult(
+        condition=sample_condition(),
+        turns=turns,
+        provenance={
+            "git_sha": "abc123",
+            "torch_version": "unknown",
+            "vllm_version": "unknown",
+            "spotlight_version": "abc123",
+        },
+        full_result={"transcript": turns[0].response + "\n" + turns[1].response},
+    )
+
+
+def test_run_metrics_from_turns():
+    metrics = RunMetrics.from_turns(sample_result().turns)
+
+    assert metrics.compliance_rate == 0.5
+    assert metrics.mean_violations == 0.5
+    assert metrics.total_violations == 1
+    assert metrics.mean_state_of_being_count == 0.5
+    assert metrics.total_contractions == 0
+    assert metrics.first_violation_turn == 2
+
+
+def test_disabled_wandb_tracker_returns_complete_payload():
+    payload = WandbTracker(enabled=False).log_result(sample_result())
+
+    assert payload["config"]["condition_id"] == "A2"
+    assert payload["config"]["git_sha"] == "abc123"
+    assert payload["metrics"]["compliance_rate"] == 0.5
+    assert payload["turns"][0]["prompt"] == "Answer without state-of-being verbs."
+    assert payload["turns"][0]["model_response"] == "Use active phrasing."
+    assert payload["full_result"]["transcript"]
+
+
+def test_enabled_wandb_tracker_emits_run_table_metrics_and_artifact():
+    class FakeTable:
+        def __init__(self, columns):
+            self.columns = columns
+            self.rows = []
+
+        def add_data(self, *row):
+            self.rows.append(row)
+
+    class FakeArtifact:
+        def __init__(self, name, type, metadata):
+            self.name = name
+            self.type = type
+            self.metadata = metadata
+            self.files = []
+
+        def add_file(self, path, name):
+            self.files.append((path, name))
+
+    class FakeRun:
+        def __init__(self):
+            self.artifacts = []
+            self.finished = False
+
+        def log_artifact(self, artifact):
+            self.artifacts.append(artifact)
+
+        def finish(self):
+            self.finished = True
+
+    class FakeWandb:
+        Table = FakeTable
+        Artifact = FakeArtifact
+
+        def __init__(self):
+            self.run = FakeRun()
+            self.init_kwargs = None
+            self.logged = None
+
+        def init(self, **kwargs):
+            self.init_kwargs = kwargs
+            return self.run
+
+        def log(self, payload):
+            self.logged = payload
+
+    fake_wandb = FakeWandb()
+    payload = WandbTracker(
+        group="MLR-20-A-alpha-sweep",
+        run_name="A2-r1-alpha-0.10",
+        tags=["MLR-20"],
+        enabled=True,
+        wandb_module=fake_wandb,
+    ).log_result(sample_result())
+
+    assert fake_wandb.init_kwargs["project"] == "vllm-hook-eprime"
+    assert fake_wandb.init_kwargs["group"] == "MLR-20-A-alpha-sweep"
+    assert fake_wandb.init_kwargs["name"] == "A2-r1-alpha-0.10"
+    assert fake_wandb.init_kwargs["config"]["git_sha"] == "abc123"
+    assert fake_wandb.logged["compliance_rate"] == 0.5
+    assert fake_wandb.logged["turn_results"].columns[:9] == [
+        "condition",
+        "turn",
+        "prompt",
+        "user_message",
+        "model_response",
+        "compliant",
+        "violation_count",
+        "state_of_being_count",
+        "contraction_count",
+    ]
+    assert len(fake_wandb.logged["turn_results"].rows) == 2
+    assert fake_wandb.run.artifacts[0].type == "experiment-result"
+    assert fake_wandb.run.artifacts[0].files[0][1] == "experiment_result.json"
+    assert fake_wandb.run.finished is True
+    assert payload["metrics"]["first_violation_turn"] == 2
+
+
+def test_alpha_sweep_conditions_avoid_invalid_factorial_combinations():
+    conditions = alpha_sweep_conditions(
+        model="Qwen/Qwen2-1.5B-Instruct",
+        turns=10,
+        temperature=0.0,
+        max_tokens=256,
+        history_window_messages=16,
+    )
+
+    by_id = {condition.condition_id: condition for condition in conditions}
+    assert by_id["A0"].spotlight is False
+    assert by_id["A0"].alpha is None
+    assert by_id["A1"].spotlight is True
+    assert by_id["A1"].alpha == 0.05
+    assert by_id["A4"].alpha == 0.20
