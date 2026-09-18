@@ -1,16 +1,23 @@
+import pytest
+
 from research.experiment_tracking import (
     ExperimentCondition,
     ExperimentResult,
     RunMetrics,
     TurnResult,
 )
-from research.experiment_tracking.conditions import alpha_sweep_conditions
+from research.experiment_tracking.conditions import (
+    MLR20_NOTION_MATRIX_URL,
+    alpha_sweep_conditions,
+    mlr20_alpha_sweep_conditions,
+)
 from research.experiment_tracking.eprime import turn_result_from_eprime_texts
 from research.experiment_tracking.eprime import extract_current_assistant_response
 from research.experiment_tracking.gpu_preflight import (
     has_required_vram,
     required_vram_bytes,
 )
+from research.experiment_tracking.mlr20 import log_mlr20_results_sequentially
 from research.experiment_tracking.wandb_adapter import WandbTracker
 
 
@@ -207,6 +214,146 @@ def test_alpha_sweep_conditions_avoid_invalid_factorial_combinations():
     assert by_id["A1"].spotlight is True
     assert by_id["A1"].alpha == 0.05
     assert by_id["A4"].alpha == 0.20
+
+
+def test_mlr20_notion_design_matrix_is_canonical_alpha_sweep():
+    conditions = mlr20_alpha_sweep_conditions(
+        temperature=0.0,
+        max_tokens=256,
+        history_window_messages=16,
+        notebook="notebooks/demo_spotlight_e_prime_colab.ipynb",
+    )
+
+    assert [condition.condition_id for condition in conditions] == [
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+    ]
+    assert [(condition.spotlight, condition.alpha) for condition in conditions] == [
+        (False, None),
+        (True, 0.05),
+        (True, 0.10),
+        (True, 0.15),
+        (True, 0.20),
+    ]
+
+    for condition in conditions:
+        assert condition.model == "Qwen/Qwen2-1.5B-Instruct"
+        assert condition.constraint_complexity == "Negative enumeration"
+        assert condition.constraint_formulation == "Full E-Prime"
+        assert condition.extra["aggregation"] == "Global aggregation"
+        assert condition.intervention_timing == "Prefill intervention"
+        assert condition.history == "Self-propagating history"
+        assert condition.turns == 10
+        assert condition.replicate == 1
+        assert condition.extra["design_matrix_url"] == MLR20_NOTION_MATRIX_URL
+
+
+def test_mlr20_sequential_logging_creates_one_wandb_run_per_condition():
+    class FakeTable:
+        def __init__(self, columns):
+            self.columns = columns
+            self.rows = []
+
+        def add_data(self, *row):
+            self.rows.append(row)
+
+    class FakeArtifact:
+        def __init__(self, name, type, metadata):
+            self.name = name
+            self.type = type
+            self.metadata = metadata
+            self.files = []
+
+        def add_file(self, path, name):
+            self.files.append((path, name))
+
+    class FakeRun:
+        def __init__(self):
+            self.artifacts = []
+            self.finished = False
+
+        def log_artifact(self, artifact):
+            self.artifacts.append(artifact)
+
+        def finish(self):
+            self.finished = True
+
+    class FakeWandb:
+        Table = FakeTable
+        Artifact = FakeArtifact
+
+        def __init__(self):
+            self.runs = []
+            self.logged = []
+
+        def init(self, **kwargs):
+            run = FakeRun()
+            self.runs.append((kwargs, run))
+            return run
+
+        def log(self, payload):
+            self.logged.append(payload)
+
+    conditions = mlr20_alpha_sweep_conditions(
+        temperature=0.0,
+        max_tokens=256,
+        history_window_messages=16,
+    )
+    results = [
+        ExperimentResult(
+            condition=condition,
+            turns=[
+                TurnResult(
+                    condition=condition.condition_id,
+                    turn=1,
+                    prompt="Prompt",
+                    response="Use active phrasing.",
+                    compliant=True,
+                    violation_count=0,
+                    state_of_being_count=0,
+                    contraction_count=0,
+                )
+            ],
+        )
+        for condition in conditions
+    ]
+    fake_wandb = FakeWandb()
+
+    payloads = log_mlr20_results_sequentially(
+        results,
+        enabled=True,
+        wandb_module=fake_wandb,
+    )
+
+    assert [payload["config"]["condition_id"] for payload in payloads] == [
+        "A0",
+        "A1",
+        "A2",
+        "A3",
+        "A4",
+    ]
+    assert [run[0]["name"] for run in fake_wandb.runs] == [
+        "A0-r1-spotlight-off-alpha-NA",
+        "A1-r1-spotlight-on-alpha-0.05",
+        "A2-r1-spotlight-on-alpha-0.10",
+        "A3-r1-spotlight-on-alpha-0.15",
+        "A4-r1-spotlight-on-alpha-0.20",
+    ]
+    assert len(fake_wandb.logged) == 5
+    assert all(run.finished for _, run in fake_wandb.runs)
+
+
+def test_mlr20_sequential_logging_rejects_duplicate_condition_runs():
+    result = sample_result()
+
+    with pytest.raises(ValueError, match="duplicate result"):
+        log_mlr20_results_sequentially(
+            [result, result],
+            enabled=False,
+        )
 
 
 def test_gpu_preflight_reservation_calculation():

@@ -52,15 +52,12 @@ from research.experiment_tracking import (
     WandbTracker,
     collect_runtime_provenance,
 )
-from research.experiment_tracking.conditions import alpha_sweep_conditions
+from research.experiment_tracking.conditions import mlr20_alpha_sweep_conditions
 
-condition = alpha_sweep_conditions(
-    model="Qwen/Qwen2-1.5B-Instruct",
-    turns=10,
+condition = mlr20_alpha_sweep_conditions(
     temperature=0.0,
     max_tokens=256,
     history_window_messages=16,
-    replicate=1,
     notebook="notebooks/demo_spotlight_e_prime_colab.ipynb",
 )[2]
 
@@ -92,6 +89,21 @@ tracker = WandbTracker(
 )
 tracker.log_result(result)
 ```
+
+For the first MLR-20 alpha sweep, the Notion Experimental Design Matrix is the
+canonical experiment specification:
+
+| Notion condition | Spotlight | alpha |
+| --- | --- | --- |
+| A0 | Off | N/A |
+| A1 | On | 0.05 |
+| A2 | On | 0.10 |
+| A3 | On | 0.15 |
+| A4 | On | 0.20 |
+
+Each row maps to exactly one `ExperimentCondition` and one W&B run. Do not
+combine baseline and Spotlight rows in a new MLR-20 W&B run; the combined
+MLR-19 run should remain historical/reference-only.
 
 ## W&B Behavior
 
@@ -148,6 +160,22 @@ Turn results are logged as a W&B Table with:
 The complete structured payload, including full transcripts when provided, is
 also stored as a W&B artifact named by condition and replicate.
 
+## MLR-20 Sequential Logging
+
+When all five conditions have been executed independently, log them in order:
+
+```python
+from research.experiment_tracking import log_mlr20_results_sequentially
+
+log_mlr20_results_sequentially(
+    [a0_result, a1_result, a2_result, a3_result, a4_result],
+)
+```
+
+This emits five distinct W&B runs and rejects duplicate condition/replicate
+results. Each result still logs config/provenance, summary metrics, the
+per-turn W&B Table, and the structured result artifact.
+
 ## MLR-20 Integration
 
 MLR-20 should consume this branch by merging or cherry-picking only the
@@ -158,4 +186,3 @@ Do not merge the MLR-19 notebook history into MLR-21. The E-Prime checker,
 prompt list, generation loop, and saved notebook outputs remain
 experiment-specific logic. The reusable MLR-21 surface is the structured result
 schema, metric aggregation, explicit condition list, and W&B adapter.
-
