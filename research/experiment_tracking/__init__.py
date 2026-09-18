@@ -7,6 +7,11 @@ from research.experiment_tracking.schemas import (
     TurnResult,
     collect_runtime_provenance,
 )
+from research.experiment_tracking.eprime import (
+    turn_result_from_assistant_score,
+    turn_result_from_eprime_row,
+    turn_result_from_eprime_texts,
+)
 from research.experiment_tracking.wandb_adapter import WandbTracker
 
 __all__ = [
@@ -16,5 +21,7 @@ __all__ = [
     "TurnResult",
     "WandbTracker",
     "collect_runtime_provenance",
+    "turn_result_from_assistant_score",
+    "turn_result_from_eprime_row",
+    "turn_result_from_eprime_texts",
 ]
-

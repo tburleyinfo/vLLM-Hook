@@ -5,6 +5,7 @@ from research.experiment_tracking import (
     TurnResult,
 )
 from research.experiment_tracking.conditions import alpha_sweep_conditions
+from research.experiment_tracking.eprime import turn_result_from_eprime_texts
 from research.experiment_tracking.wandb_adapter import WandbTracker
 
 
@@ -181,3 +182,55 @@ def test_alpha_sweep_conditions_avoid_invalid_factorial_combinations():
     assert by_id["A1"].spotlight is True
     assert by_id["A1"].alpha == 0.05
     assert by_id["A4"].alpha == 0.20
+
+
+def test_eprime_tracking_ignores_user_message_violations():
+    turn = turn_result_from_eprime_texts(
+        condition="spotlight",
+        turn=1,
+        user_message="Is there a way to be concise about this?",
+        assistant_response="Use concise active phrasing.",
+        score_fn=_simple_eprime_score,
+    )
+
+    assert turn.prompt == "Is there a way to be concise about this?"
+    assert turn.response == "Use concise active phrasing."
+    assert turn.compliant is True
+    assert turn.violation_count == 0
+    assert turn.state_of_being_count == 0
+    assert turn.contraction_count == 0
+
+
+def test_eprime_tracking_counts_assistant_response_violations():
+    turn = turn_result_from_eprime_texts(
+        condition="spotlight",
+        turn=1,
+        user_message="Give a concise active phrasing.",
+        assistant_response="This is concise.",
+        score_fn=_simple_eprime_score,
+    )
+
+    assert turn.prompt == "Give a concise active phrasing."
+    assert turn.response == "This is concise."
+    assert turn.compliant is False
+    assert turn.violation_count == 1
+    assert turn.state_of_being_count == 1
+    assert turn.contraction_count == 0
+
+
+def _simple_eprime_score(text):
+    state_of_being_count = sum(
+        1 for token in text.lower().replace("?", "").replace(".", "").split()
+        if token in {"am", "is", "are", "was", "were", "be", "being", "been"}
+    )
+    contraction_count = sum(
+        text.lower().count(contraction)
+        for contraction in ["i'm", "you're", "we're", "they're", "it's"]
+    )
+    violation_count = state_of_being_count + contraction_count
+    return {
+        "state_of_being_count": state_of_being_count,
+        "contraction_count": contraction_count,
+        "e_prime_violation_count": violation_count,
+        "e_prime_retained": violation_count == 0,
+    }
