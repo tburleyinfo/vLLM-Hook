@@ -4,12 +4,16 @@ from vllm_hook_plugins.hook_client import HookClient
 from vllm_hook_plugins.workers.probe_hookqk_worker import ProbeHookQKWorker
 from vllm_hook_plugins.workers.steer_activation_worker import SteerHookActWorker
 from vllm_hook_plugins.workers.probe_hidden_states_worker import ProbeHiddenStatesWorker
-from vllm_hook_plugins.workers.spotlight_worker import SpotlightWorker
+from vllm_hook_plugins.workers.spotlight_worker import (
+    QueryPreservingSpotlightWorker,
+    SpotlightWorker,
+)
 from vllm_hook_plugins.analyzers.attention_tracker_analyzer import AttntrackerAnalyzer
 from vllm_hook_plugins.analyzers.core_reranker_analyzer import CorerAnalyzer
 from vllm_hook_plugins.analyzers.hidden_states_analyzer import HiddenStatesAnalyzer
 from vllm_hook_plugins.analyzers.science_hallucination_analyzer import ScienceHallucinationAnalyzer
 from vllm_hook_plugins.utils.spotlight.utils import generate_with_spotlight
+from vllm_hook_plugins.utils.spotlight.utils import generate_with_query_preserving_spotlight
 
 
 def register_plugins():
@@ -19,6 +23,7 @@ def register_plugins():
     PluginRegistry.register_worker("steer_hook_act",      SteerHookActWorker)
     PluginRegistry.register_worker("probe_hidden_states", ProbeHiddenStatesWorker)
     PluginRegistry.register_worker("probe_spotlight",     SpotlightWorker)
+    PluginRegistry.register_worker("probe_spotlight_query_preserving", QueryPreservingSpotlightWorker)
 
     # Register analyzers
     PluginRegistry.register_analyzer("attn_tracker",          AttntrackerAnalyzer)
@@ -34,10 +39,12 @@ __all__ = [
     "SteerHookActWorker",
     "ProbeHiddenStatesWorker",
     "SpotlightWorker",
+    "QueryPreservingSpotlightWorker",
     "AttntrackerAnalyzer",
     "CorerAnalyzer",
     "HiddenStatesAnalyzer",
     "ScienceHallucinationAnalyzer",
     "generate_with_spotlight",
+    "generate_with_query_preserving_spotlight",
     "register_plugins"
 ]

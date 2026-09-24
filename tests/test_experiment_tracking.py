@@ -10,6 +10,7 @@ from research.experiment_tracking.conditions import (
     MLR20_NOTION_MATRIX_URL,
     alpha_sweep_conditions,
     mlr20_alpha_sweep_conditions,
+    mlr20_query_preserving_conditions,
 )
 from research.experiment_tracking.eprime import turn_result_from_eprime_texts
 from research.experiment_tracking.eprime import extract_current_assistant_response
@@ -253,6 +254,24 @@ def test_mlr20_notion_design_matrix_is_canonical_alpha_sweep():
         assert condition.turns == 10
         assert condition.replicate == 1
         assert condition.extra["design_matrix_url"] == MLR20_NOTION_MATRIX_URL
+
+
+def test_mlr30_mlr32_query_preserving_conditions_exclude_invalidated_c1():
+    conditions = mlr20_query_preserving_conditions(
+        temperature=0.0,
+        max_tokens=256,
+        history_window_messages=16,
+    )
+
+    by_id = {condition.condition_id: condition for condition in conditions}
+    assert list(by_id) == ["A2", "C0", "C2"]
+    assert "C1" not in by_id
+    assert by_id["A2"].extra["worker_name"] == "probe_spotlight"
+    assert by_id["C0"].implementation == "global_diagnostic"
+    assert by_id["C2"].implementation == "query_preserving_spotlight"
+    assert by_id["C2"].extra["worker_name"] == "probe_spotlight_query_preserving"
+    assert by_id["C2"].extra["spotlight_implementation_mode"] == "C2_QUERY_PRESERVING_WORKER"
+    assert "C1" not in by_id["C2"].extra["notion_experiment"]
 
 
 def test_mlr20_sequential_logging_creates_one_wandb_run_per_condition():

@@ -6,6 +6,7 @@ from research.experiment_tracking.schemas import ExperimentCondition
 MLR20_NOTION_MATRIX_URL = "https://app.notion.com/p/67e02acb45554df7811f1c8b3203c7c8"
 MLR20_NOTION_MATRIX_ID = "67e02acb45554df7811f1c8b3203c7c8"
 MLR20_COMPARISON_GROUP = "MLR-20-A-alpha-sweep"
+MLR20_C_SERIES_COMPARISON_GROUP = "MLR-20-C-aggregation-resolution"
 MLR20_MODEL = "Qwen/Qwen2-1.5B-Instruct"
 MLR20_TURNS = 10
 MLR20_REPLICATE = 1
@@ -118,6 +119,86 @@ def mlr20_alpha_sweep_conditions(
             alpha,
             implementation,
         ) in _MLR20_ALPHA_SWEEP_ROWS
+    ]
+
+
+def mlr20_query_preserving_conditions(
+    *,
+    temperature: float,
+    max_tokens: int,
+    history_window_messages: int | None,
+    seed: int | None = None,
+    notebook: str | None = "notebooks/demo_spotlight_e_prime_query_preserving_colab.ipynb",
+) -> list[ExperimentCondition]:
+    """Return the focused A2/C0/C2 E-Prime comparison for MLR-30/32.
+
+    C2 is a novel aggregation-granularity ablation. It should not be described
+    as C1/C1v2 or as paper/reference-faithful.
+    """
+
+    common = {
+        "comparison_group": MLR20_C_SERIES_COMPARISON_GROUP,
+        "spotlight": True,
+        "alpha": 0.10,
+        "model": MLR20_MODEL,
+        "constraint_formulation": "Full E-Prime",
+        "constraint_complexity": "Negative enumeration",
+        "intervention_timing": "Prefill intervention",
+        "history": "Self-propagating history",
+        "turns": MLR20_TURNS,
+        "replicate": MLR20_REPLICATE,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "history_window_messages": history_window_messages,
+        "seed": seed,
+        "notebook": notebook,
+        "tags": ("MLR-20", "MLR-30", "MLR-32", "C-series", "aggregation-resolution"),
+    }
+
+    return [
+        ExperimentCondition(
+            condition_id="A2",
+            implementation="spotlight",
+            extra={
+                "notion_experiment": "A2 Spotlight alpha=.10",
+                "notion_comparison_group": "A — Alpha sweep",
+                "notion_implementation": "Global aggregation",
+                "aggregation": "Global aggregation",
+                "worker_name": "probe_spotlight",
+                "role": "canonical reference",
+            },
+            **common,
+        ),
+        ExperimentCondition(
+            condition_id="C0",
+            implementation="global_diagnostic",
+            extra={
+                "notion_experiment": "C0 Global aggregation + per-query diagnostic alpha 0.10",
+                "notion_comparison_group": "C — Aggregation resolution",
+                "notion_implementation": "Global aggregation with per-query diagnostic logging",
+                "aggregation": "Global aggregation",
+                "diagnostic": "Record per-query psi_current(i) while retaining canonical global aggregation",
+                "spotlight_implementation_mode": "C0_GLOBAL_DIAGNOSTIC",
+                "worker_name": "probe_spotlight",
+                "role": "diagnostic reference",
+            },
+            **common,
+        ),
+        ExperimentCondition(
+            condition_id="C2",
+            implementation="query_preserving_spotlight",
+            extra={
+                "notion_experiment": "C2 Query-preserving Spotlight worker alpha=.10",
+                "notion_comparison_group": "C — Aggregation resolution",
+                "notion_implementation": "Query-preserving Spotlight worker",
+                "aggregation": "Query-indexed control",
+                "diagnostic": "Novel aggregation-granularity ablation; preserves Q in psi_current/bias",
+                "spotlight_implementation_mode": "C2_QUERY_PRESERVING_WORKER",
+                "worker_name": "probe_spotlight_query_preserving",
+                "role": "novel MLR-30/32 ablation",
+            },
+            **common,
+        ),
     ]
 
 

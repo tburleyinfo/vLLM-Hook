@@ -7,7 +7,10 @@ from research.experiment_tracking.schemas import (
     TurnResult,
     collect_runtime_provenance,
 )
-from research.experiment_tracking.conditions import mlr20_alpha_sweep_conditions
+from research.experiment_tracking.conditions import (
+    mlr20_alpha_sweep_conditions,
+    mlr20_query_preserving_conditions,
+)
 from research.experiment_tracking.eprime import (
     extract_current_assistant_response,
     turn_result_from_assistant_score,
@@ -34,6 +37,7 @@ __all__ = [
     "WandbTracker",
     "collect_runtime_provenance",
     "mlr20_alpha_sweep_conditions",
+    "mlr20_query_preserving_conditions",
     "extract_current_assistant_response",
     "turn_result_from_assistant_score",
     "turn_result_from_eprime_row",

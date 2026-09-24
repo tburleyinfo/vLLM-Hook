@@ -21,6 +21,7 @@ from vllm_hook_plugins.workers._common import (
     match_attn,
 )
 from vllm_hook_plugins.utils.spotlight.utils import (
+    compute_query_preserving_spotlight_bias,
     compute_spotlight_bias,
     repeat_kv,
 )
@@ -43,6 +44,8 @@ class SpotlightWorker:
 
     _default_hooks_on: str = "prefill"
     _spotlight_hooks_installed: bool = False
+    _spotlight_bias_fn = staticmethod(compute_spotlight_bias)
+    _spotlight_variant_name: str = "canonical"
 
     def install_hooks(self):
         """Install Spotlight forward hooks on .attn modules. Idempotent.
@@ -201,7 +204,7 @@ class SpotlightWorker:
 
                     # Apply Spotlight bias
                     logits_4d = logits.unsqueeze(0)  # [1, heads, qlen, qlen]
-                    modified_weights = compute_spotlight_bias(
+                    modified_weights = self._spotlight_bias_fn(
                         logits_4d, [span_ranges], target_proportion=alpha
                     )
                     modified_weights = modified_weights.squeeze(0)
@@ -228,3 +231,15 @@ class SpotlightWorker:
             matched.append(name)
 
         logger.info(f"Installed {len(self._spotlight_hooks)} Spotlight hooks on: {matched[:3]}...")
+
+
+class QueryPreservingSpotlightWorker(SpotlightWorker):
+    """Novel query-preserving Spotlight aggregation-granularity ablation.
+
+    This worker intentionally keeps canonical Spotlight behavior isolated under
+    probe_spotlight. It changes only the internal controller granularity while
+    preserving the external [B,H,Q,K] -> [B,H,Q,K] attention boundary.
+    """
+
+    _spotlight_bias_fn = staticmethod(compute_query_preserving_spotlight_bias)
+    _spotlight_variant_name: str = "query_preserving"
