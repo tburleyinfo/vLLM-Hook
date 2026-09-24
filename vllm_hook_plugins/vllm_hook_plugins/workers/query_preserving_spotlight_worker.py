@@ -16,8 +16,10 @@ from vllm_hook_plugins.workers._common import (
     iter_matched_modules,
     match_attn,
 )
-from vllm_hook_plugins.utils.spotlight.utils import (
+from vllm_hook_plugins.utils.query_preserving_spotlight.utils import (
     compute_query_preserving_spotlight_bias,
+)
+from vllm_hook_plugins.utils.spotlight.utils import (
     repeat_kv,
 )
 
