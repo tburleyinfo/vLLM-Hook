@@ -31,6 +31,21 @@ compute_query_preserving_spotlight_bias = (
 )
 compute_spotlight_bias = spotlight_utils.compute_spotlight_bias
 
+CANONICAL_WORKER_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "vllm_hook_plugins"
+    / "vllm_hook_plugins"
+    / "workers"
+    / "spotlight_worker.py"
+)
+QUERY_PRESERVING_WORKER_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "vllm_hook_plugins"
+    / "vllm_hook_plugins"
+    / "workers"
+    / "query_preserving_spotlight_worker.py"
+)
+
 
 def _canonical_reference(logits, span_ranges, target_proportion):
     attn_weights = F.softmax(logits, dim=-1)
@@ -144,3 +159,18 @@ def test_query_preserving_broadcasts_bias_across_heads_but_not_queries():
     assert bias[0].item() == pytest.approx(0.0)
     assert bias[1].item() > 0
     assert not torch.allclose(bias[1], bias[3])
+
+
+def test_query_preserving_worker_is_separate_and_directly_uses_query_helper():
+    canonical_source = CANONICAL_WORKER_PATH.read_text()
+    query_source = QUERY_PRESERVING_WORKER_PATH.read_text()
+
+    assert "QueryPreservingSpotlightWorker" not in canonical_source
+    assert "compute_query_preserving_spotlight_bias" not in canonical_source
+    assert "modified_weights = compute_spotlight_bias(" in canonical_source
+    assert "class QueryPreservingSpotlightWorker:" in query_source
+    assert "class QueryPreservingSpotlightWorker(SpotlightWorker)" not in query_source
+    assert "modified_weights = compute_query_preserving_spotlight_bias(" in query_source
+    assert "modified_weights = compute_spotlight_bias(" not in query_source
+    assert "_spotlight_bias_fn" not in canonical_source
+    assert "_spotlight_bias_fn" not in query_source

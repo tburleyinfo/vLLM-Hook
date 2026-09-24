@@ -4,10 +4,10 @@ from vllm_hook_plugins.hook_client import HookClient
 from vllm_hook_plugins.workers.probe_hookqk_worker import ProbeHookQKWorker
 from vllm_hook_plugins.workers.steer_activation_worker import SteerHookActWorker
 from vllm_hook_plugins.workers.probe_hidden_states_worker import ProbeHiddenStatesWorker
-from vllm_hook_plugins.workers.spotlight_worker import (
+from vllm_hook_plugins.workers.query_preserving_spotlight_worker import (
     QueryPreservingSpotlightWorker,
-    SpotlightWorker,
 )
+from vllm_hook_plugins.workers.spotlight_worker import SpotlightWorker
 from vllm_hook_plugins.analyzers.attention_tracker_analyzer import AttntrackerAnalyzer
 from vllm_hook_plugins.analyzers.core_reranker_analyzer import CorerAnalyzer
 from vllm_hook_plugins.analyzers.hidden_states_analyzer import HiddenStatesAnalyzer
