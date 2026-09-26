@@ -442,34 +442,37 @@ def app_html() -> str:
   <title>vLLM-Hook Correspondence Review</title>
   <style>
     :root {
-      --bg: #f6f5f1;
+      --bg: #f4f6f8;
       --panel: #ffffff;
-      --panelSoft: #fbfaf7;
-      --panelHead: #f1f0ea;
-      --line: #d7d5cc;
-      --text: #202124;
-      --muted: #63645f;
-      --accent: #176b5b;
-      --accentSoft: #e5f2ed;
-      --warn: #8a5a00;
-      --danger: #b3261e;
-      --aiBg: #243447;
+      --panelSoft: #f8fafc;
+      --panelHead: #eef3f7;
+      --line: #d7dee7;
+      --text: #1d2733;
+      --muted: #657386;
+      --accent: #0a7891;
+      --accentSoft: #e3f5f8;
+      --warn: #9a6700;
+      --danger: #b42318;
+      --success: #137a49;
+      --aiBg: #17435b;
       --buttonBg: #ffffff;
-      --buttonHover: #aaa79b;
+      --buttonHover: #8ba1b3;
       --inputBg: #ffffff;
-      --refBg: #eef4f7;
-      --refText: #254756;
-      --blankBg: #faf9f4;
-      --blankStripe: #f0eee6;
-      --emptyRefText: #a09c91;
-      --relationBg: #fffdf5;
-      --alignedBg: #f4fbf8;
-      --staggeredBg: #fffdf7;
-      --unmatchedBg: #fbf7f7;
+      --refBg: #eaf3f8;
+      --refText: #20576a;
+      --blankBg: #f6f8fa;
+      --blankStripe: #e9eef3;
+      --emptyRefText: #8b98a7;
+      --relationBg: #fffaf0;
+      --alignedBg: #f2fbf7;
+      --staggeredBg: #fff9e8;
+      --unmatchedBg: #fff4f2;
       --code: #101418;
       --codeText: #eef2f3;
       --codeLine: #8ea0a8;
       --codeHit: #31424d;
+      --cudaPane: 1fr;
+      --metalPane: 1fr;
     }
     body[data-theme="dark"] {
       --bg: #101315;
@@ -483,6 +486,7 @@ def app_html() -> str:
       --accentSoft: #17352f;
       --warn: #f1c66b;
       --danger: #ff8a80;
+      --success: #71d6a5;
       --aiBg: #2d4254;
       --buttonBg: #20272b;
       --buttonHover: #566167;
@@ -558,11 +562,49 @@ def app_html() -> str:
       min-height: calc(100vh - 58px);
       overflow: hidden;
     }
+    body.sidebar-collapsed .app,
+    .app.sidebar-collapsed {
+      grid-template-columns: 0 minmax(0, 1fr);
+    }
     aside {
       border-right: 1px solid var(--line);
       background: var(--panelSoft);
       overflow: auto;
       max-height: calc(100vh - 58px);
+    }
+    body.sidebar-collapsed aside,
+    .app.sidebar-collapsed aside {
+      overflow: hidden;
+      border-right: 0;
+    }
+    body.sidebar-collapsed aside > *,
+    .app.sidebar-collapsed aside > * {
+      display: none;
+    }
+    .sidebar-toggle {
+      position: fixed;
+      top: 94px;
+      left: calc(340px - 15px);
+      z-index: 20;
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 44px;
+      padding: 0;
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 22px;
+      font-weight: 800;
+      line-height: 1;
+      box-shadow: 0 4px 14px color-mix(in srgb, var(--text) 14%, transparent);
+    }
+    body.sidebar-collapsed .sidebar-toggle {
+      left: 8px;
+    }
+    .sidebar-toggle:hover {
+      color: var(--accent);
+      border-color: var(--accent);
     }
     .filters {
       display: flex;
@@ -632,6 +674,8 @@ def app_html() -> str:
     main {
       min-width: 0;
       padding: 16px;
+      overflow: auto;
+      max-height: calc(100vh - 58px);
     }
     .metrics {
       display: grid;
@@ -647,12 +691,41 @@ def app_html() -> str:
     }
     .metric strong { display: block; font-size: 20px; }
     .metric span { color: var(--muted); font-size: 12px; }
-    .toolbar {
+    .workbench-head {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      display: grid;
+      gap: 12px;
+      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 14px;
+      backdrop-filter: blur(12px);
+    }
+    .workbench-title {
+      display: grid;
+      gap: 8px;
+      min-width: 0;
+    }
+    .workbench-title h2 {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.25;
+    }
+    .workbench-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .workbench-actions {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      margin-bottom: 14px;
+      flex-wrap: wrap;
     }
     .meta {
       background: var(--panel);
@@ -728,7 +801,7 @@ def app_html() -> str:
     .tabs {
       display: flex;
       gap: 8px;
-      margin-bottom: 10px;
+      flex-wrap: wrap;
     }
     .tab.active {
       border-color: var(--accent);
@@ -767,38 +840,55 @@ def app_html() -> str:
       border-bottom: 1px solid var(--line);
     }
     .matrix-head h3 { margin: 0; font-size: 14px; }
-    .matrix-scroll { overflow: auto; max-height: 68vh; }
-    table.matrix {
-      width: 100%;
-      border-collapse: collapse;
-      table-layout: fixed;
-      font-size: 13px;
+    .matrix-tools {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
     }
-    .matrix th {
-      position: sticky;
-      top: 0;
-      background: var(--panelHead);
-      z-index: 1;
-      text-align: left;
-      border-bottom: 1px solid var(--line);
+    .pane-sizer {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .pane-sizer input {
+      width: 130px;
+      min-height: 0;
+      accent-color: var(--accent);
+    }
+    .matrix-hint {
+      padding: 0 12px 10px;
+      white-space: normal;
+    }
+    .matrix-rows {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      max-height: 68vh;
+      overflow: auto;
+    }
+    .matrix-row {
+      display: grid;
+      grid-template-columns: 28px minmax(120px, .55fr) minmax(180px, var(--cudaPane)) minmax(180px, var(--metalPane)) minmax(118px, .45fr);
+      gap: 8px;
+      align-items: stretch;
+      border: 1px solid var(--line);
+      border-radius: 8px;
       padding: 8px;
     }
-    .matrix td {
-      border-bottom: 1px solid var(--line);
-      border-right: 1px solid var(--line);
-      vertical-align: top;
-      padding: 0;
-    }
-    .matrix-row.aligned-row td {
+    .matrix-row.aligned-row {
       background: var(--alignedBg);
     }
-    .matrix-row.staggered-row td {
+    .matrix-row.staggered-row {
       background: var(--staggeredBg);
     }
-    .matrix-row.unmatched-row td {
+    .matrix-row.unmatched-row {
       background: var(--unmatchedBg);
     }
-    .matrix-row.generated-row td {
+    .matrix-row.generated-row {
       box-shadow: inset 3px 0 0 var(--accent);
       animation: generatedPulse 3s ease-out;
     }
@@ -806,42 +896,198 @@ def app_html() -> str:
       0% { background: var(--accentSoft); }
       100% { background: inherit; }
     }
-    .matrix th:nth-child(1), .matrix td:nth-child(1) { width: 110px; }
-    .matrix th:nth-child(2), .matrix td:nth-child(2) { width: 120px; }
-    .matrix th:nth-child(3), .matrix td:nth-child(3),
-    .matrix th:nth-child(5), .matrix td:nth-child(5) { width: 22%; }
-    .matrix th:nth-child(4), .matrix td:nth-child(4),
-    .matrix th:nth-child(6), .matrix td:nth-child(6) { width: 140px; }
-    .matrix th:nth-child(7), .matrix td:nth-child(7) { width: 26%; }
-    .matrix th:nth-child(8), .matrix td:nth-child(8) { width: 130px; }
-    .matrix th:nth-child(9), .matrix td:nth-child(9) { width: 96px; }
-    .matrix textarea, .matrix input {
-      width: 100%;
-      min-height: 74px;
+    .row-cell {
+      min-width: 0;
+      display: grid;
+      align-content: start;
+      gap: 6px;
+    }
+    .row-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .row-kind-wrap {
+      display: grid;
+      gap: 6px;
+    }
+    .diff-cell {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      overflow: hidden;
+      background: var(--panel);
+    }
+    .diff-cell.cuda-side {
+      border-color: color-mix(in srgb, var(--danger) 22%, var(--line));
+    }
+    .diff-cell.metal-side {
+      border-color: color-mix(in srgb, var(--success) 24%, var(--line));
+    }
+    .diff-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 30px;
+      padding: 5px 7px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panelHead);
+    }
+    .diff-head .row-label {
+      letter-spacing: 0;
+      text-transform: none;
+      font-size: 12px;
+    }
+    .diff-op {
+      display: inline-grid;
+      place-items: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 4px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 700;
+    }
+    .cuda-side .diff-op {
+      color: var(--danger);
+      background: color-mix(in srgb, var(--danger) 12%, transparent);
+    }
+    .metal-side .diff-op {
+      color: var(--success);
+      background: color-mix(in srgb, var(--success) 14%, transparent);
+    }
+    .diff-cell .ref-chip {
+      border-width: 0 0 1px;
+      border-color: var(--line);
+      border-radius: 0;
+      min-height: 30px;
+    }
+    .inline-snippet {
+      border-bottom: 1px solid var(--line);
+      background: var(--code);
+      display: none;
+      min-width: 0;
+    }
+    .inline-snippet.open {
+      display: block;
+    }
+    .snippet-scroll {
+      max-height: 260px;
+      overflow: auto;
+      overscroll-behavior: contain;
+    }
+    .snippet-code {
+      display: grid;
+      grid-template-columns: max-content max-content;
+      width: max-content;
+      min-width: 100%;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.5;
+      white-space: pre;
+    }
+    .snippet-gutter {
+      position: sticky;
+      left: 0;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: 2.2em 4.5em;
+      gap: 0;
+      padding: 8px 8px 8px 10px;
+      color: var(--codeLine);
+      background: var(--code);
+      border-right: 1px solid var(--codeHit);
+      text-align: right;
+      user-select: none;
+    }
+    .snippet-marker.hit {
+      color: var(--accent);
+      font-weight: 700;
+    }
+    .snippet-line {
+      padding: 8px 12px;
+      color: var(--codeText);
+      min-width: 0;
+    }
+    .snippet-gutter.snippet-row-hit,
+    .snippet-line.snippet-row-hit {
+      background: var(--codeHit);
+    }
+    .inline-snippet pre {
+      max-height: 260px;
+      font-size: 11px;
+      line-height: 1.5;
+      padding: 8px 10px;
+      overflow: auto;
+      white-space: pre;
+    }
+    .inline-snippet .path {
+      padding: 7px 10px 0;
+      color: var(--codeLine);
+      white-space: normal;
+    }
+    .diff-cell textarea {
       border: 0;
       border-radius: 0;
+      min-height: 86px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+    .cuda-side textarea {
+      background: color-mix(in srgb, var(--danger) 8%, var(--inputBg));
+    }
+    .metal-side textarea {
+      background: color-mix(in srgb, var(--success) 9%, var(--inputBg));
+    }
+    .relationship-detail {
+      grid-column: 3 / 5;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--panel) 80%, transparent);
+      overflow: hidden;
+    }
+    .relationship-detail summary {
+      cursor: pointer;
+      padding: 7px 9px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .relationship-detail textarea {
+      border-width: 1px 0 0;
+      border-radius: 0;
+      min-height: 68px;
+      background: var(--relationBg);
+    }
+    .matrix-row textarea, .matrix-row input {
+      width: 100%;
+      min-height: 64px;
+      border: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+      border-radius: 6px;
       resize: vertical;
-      background: transparent;
-      padding: 8px;
+      background: color-mix(in srgb, var(--inputBg) 88%, transparent);
+      padding: 7px;
       line-height: 1.35;
     }
-    .matrix input {
-      min-height: 38px;
+    .matrix-row input {
+      min-height: 32px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
     }
     .ref-chip {
       display: block;
       width: 100%;
-      min-height: 38px;
-      border: 0;
-      border-radius: 0;
+      min-height: 32px;
+      border: 1px solid color-mix(in srgb, var(--refText) 20%, var(--line));
+      border-radius: 6px;
       background: var(--refBg);
       color: var(--refText);
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 12px;
       line-height: 1.35;
-      padding: 8px;
+      padding: 6px 8px;
       text-align: left;
       overflow-wrap: anywhere;
     }
@@ -849,6 +1095,7 @@ def app_html() -> str:
       background: var(--blankBg);
       color: var(--emptyRefText);
     }
+    .blank-cell,
     .blank-cell textarea {
       background: repeating-linear-gradient(
         -45deg,
@@ -862,9 +1109,8 @@ def app_html() -> str:
     .row-actions {
       display: grid;
       gap: 6px;
-      padding: 8px;
     }
-    .row-actions select {
+    .matrix-row select {
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -876,7 +1122,7 @@ def app_html() -> str:
     .select-cell {
       display: grid;
       place-items: start center;
-      padding: 10px 4px;
+      padding-top: 24px;
     }
     .select-cell input {
       width: 18px;
@@ -954,6 +1200,27 @@ def app_html() -> str:
       font-size: 12px;
       font-weight: 700;
     }
+    .state-strip {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panelSoft);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .state-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--muted);
+    }
+    .state-dot.running { background: var(--warn); }
+    .state-dot.done { background: var(--success); }
+    .state-dot.idle { background: var(--accent); }
     .snippet-panel {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -1057,7 +1324,15 @@ def app_html() -> str:
     @media (max-width: 980px) {
       .app { grid-template-columns: 1fr; }
       aside { max-height: 260px; border-right: 0; border-bottom: 1px solid var(--line); }
+      .sidebar-toggle { top: 86px; left: 12px; }
+      body.sidebar-collapsed .sidebar-toggle { left: 12px; }
       .summaries, .codegrid, .note-grid, .analysis, .metrics, .semantic-grid { grid-template-columns: 1fr; }
+      main { max-height: none; }
+      .workbench-head { position: static; }
+      .matrix-row { grid-template-columns: 28px 1fr; }
+      .row-cell { grid-column: 2; }
+      .relationship-detail { grid-column: 2; }
+      .select-cell { grid-row: 1 / span 5; }
     }
   </style>
 </head>
@@ -1074,6 +1349,7 @@ def app_html() -> str:
     </div>
   </header>
   <div class="app">
+    <button id="sideToggle" class="sidebar-toggle" type="button" title="Hide queue" aria-label="Hide queue">&lsaquo;</button>
     <aside>
       <div class="filters">
         <input id="search" placeholder="Search pairs">
@@ -1095,12 +1371,15 @@ def app_html() -> str:
     let activeView = "matrix";
     let activeJobId = null;
     let currentPayload = null;
+    let paneSplit = Number(localStorage.getItem("correspondencePaneSplit") || 50);
 
     const entryList = document.getElementById("entryList");
     const detail = document.getElementById("detail");
     const search = document.getElementById("search");
     const statusFilter = document.getElementById("statusFilter");
+    const sideToggle = document.getElementById("sideToggle");
     const themeToggle = document.getElementById("themeToggle");
+    const appShell = document.querySelector(".app");
 
     function applyTheme(theme) {
       document.body.dataset.theme = theme;
@@ -1108,12 +1387,39 @@ def app_html() -> str:
       themeToggle.textContent = theme === "dark" ? "Light Mode" : "Dark Mode";
     }
 
+    function applySidebar(collapsed) {
+      document.body.classList.toggle("sidebar-collapsed", collapsed);
+      appShell?.classList.toggle("sidebar-collapsed", collapsed);
+      localStorage.setItem("correspondenceSidebarCollapsed", collapsed ? "1" : "0");
+      sideToggle.innerHTML = collapsed ? "&rsaquo;" : "&lsaquo;";
+      sideToggle.title = collapsed ? "Show queue" : "Hide queue";
+      sideToggle.setAttribute("aria-label", collapsed ? "Show queue" : "Hide queue");
+    }
+
+    function toggleSidebar() {
+      applySidebar(!document.body.classList.contains("sidebar-collapsed"));
+    }
+
+    function applyPaneSplit(value) {
+      paneSplit = Math.max(25, Math.min(75, Number(value) || 50));
+      const cudaSize = Math.max(0.5, paneSplit / 50);
+      const metalSize = Math.max(0.5, (100 - paneSplit) / 50);
+      document.documentElement.style.setProperty("--cudaPane", `${cudaSize}fr`);
+      document.documentElement.style.setProperty("--metalPane", `${metalSize}fr`);
+      localStorage.setItem("correspondencePaneSplit", String(paneSplit));
+      const slider = document.getElementById("paneSplit");
+      if (slider) slider.value = String(paneSplit);
+    }
+
     const savedTheme = localStorage.getItem("correspondenceTheme");
     const preferredTheme = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     applyTheme(savedTheme || preferredTheme);
+    applySidebar(localStorage.getItem("correspondenceSidebarCollapsed") === "1");
+    applyPaneSplit(paneSplit);
     themeToggle.addEventListener("click", () => {
       applyTheme(document.body.dataset.theme === "dark" ? "light" : "dark");
     });
+    sideToggle.addEventListener("click", toggleSidebar);
 
     function escapeHtml(value) {
       return String(value ?? "")
@@ -1166,6 +1472,24 @@ def app_html() -> str:
         rendered.push(`${marker} ${String(number).padStart(5, " ")}  ${lines[number - 1] || ""}`);
       }
       return escapeHtml(rendered.join("\\n"));
+    }
+
+    function renderInlineSnippet(content, startLine, radius = 8) {
+      const lines = String(content || "").split("\\n");
+      const start = Math.max(1, startLine - radius);
+      const end = Math.min(lines.length, startLine + radius);
+      const rows = [];
+      for (let number = start; number <= end; number += 1) {
+        const isHit = number === startLine;
+        rows.push(`
+          <div class="snippet-gutter ${isHit ? "snippet-row-hit" : ""}">
+            <span class="snippet-marker ${isHit ? "hit" : ""}">${isHit ? "&gt;&gt;" : ""}</span>
+            <span>${escapeHtml(String(number))}</span>
+          </div>
+          <div class="snippet-line ${isHit ? "snippet-row-hit" : ""}">${escapeHtml(lines[number - 1] || " ")}</div>
+        `);
+      }
+      return `<div class="snippet-scroll"><div class="snippet-code">${rows.join("")}</div></div>`;
     }
 
     function lineFromRef(ref) {
@@ -1276,34 +1600,39 @@ def app_html() -> str:
       const risks = payload.inspection_risks || [];
       detail.innerHTML = `
         <div class="metrics" id="metrics"></div>
-        <div class="toolbar">
-          <div class="tabs">
-            <button class="tab ${activeView === "matrix" ? "active" : ""}" data-view="matrix">Matrix</button>
-            <button class="tab ${activeView === "side" ? "active" : ""}" data-view="side">Full Code</button>
-            <button class="tab ${activeView === "semantic" ? "active" : ""}" data-view="semantic">Semantic Split</button>
+        <section class="workbench-head">
+          <div class="workbench-title">
+            <h2>${escapeHtml(payload.logical_component)}</h2>
+            <div class="workbench-meta">
+              <span class="pill ${escapeHtml(payload.status)}">${escapeHtml(payload.status)}</span>
+              <span class="pill">${escapeHtml(payload.confidence)} confidence</span>
+              ${payload.generation_started_at ? `<span class="pill">generated ${escapeHtml(formatTimestamp(payload.generation_started_at))}</span>` : ""}
+            </div>
           </div>
-          <span class="pill ${escapeHtml(payload.status)}">${escapeHtml(payload.status)} / ${escapeHtml(payload.confidence)} confidence</span>
-        </div>
-        <section class="meta">
-          <h2>${escapeHtml(payload.logical_component)}</h2>
           <div class="paths">
             <div><strong>CUDA</strong> <code>${escapeHtml(payload.cuda_path)}</code></div>
             <div><strong>Metal</strong> <code>${escapeHtml(payload.metal_path)}</code></div>
-            ${payload.generation_started_at ? `<div><strong>Last generation</strong> <code>${escapeHtml(formatTimestamp(payload.generation_started_at))}</code>${payload.generation_completed_at ? ` to <code>${escapeHtml(formatTimestamp(payload.generation_completed_at))}</code>` : " running"}</div>` : ""}
           </div>
-          <div class="note-grid">
-            <textarea id="note">${escapeHtml(payload.divergence_note)}</textarea>
-            <select id="confidence">
-              ${["high", "medium", "low"].map((value) => `<option value="${value}" ${payload.confidence === value ? "selected" : ""}>${value}</option>`).join("")}
-            </select>
+          <div class="state-strip">
+            <span class="state-dot ${payload.generation_completed_at ? "done" : (payload.generation_started_at ? "running" : "idle")}"></span>
+            <span>${payload.generation_started_at ? (payload.generation_completed_at ? "Generation complete" : "Generation running") : "Ready for review"}</span>
+            <span>${escapeHtml((payload.comparison_rows || []).length)} matrix rows</span>
+            <span>Refs open code excerpts in place</span>
           </div>
-          <div class="actions">
-            <button class="ai" id="analyze">Generate Candidate Matrix</button>
-            <button id="strong">Strong Candidate</button>
-            <button class="primary" id="approve">Approve</button>
-            <button id="save">Save Draft</button>
-            <button id="addRow">Add Matrix Row</button>
-            <button class="danger" id="reject">Reject</button>
+          <div class="workbench-actions">
+            <div class="tabs">
+              <button class="tab ${activeView === "matrix" ? "active" : ""}" data-view="matrix">Matrix</button>
+              <button class="tab ${activeView === "semantic" ? "active" : ""}" data-view="semantic">Semantic</button>
+              <button class="tab ${activeView === "side" ? "active" : ""}" data-view="side">Code</button>
+            </div>
+            <div class="actions">
+              <button class="ai" id="analyze">Generate Matrix</button>
+              <button id="strong">Strong</button>
+              <button class="primary" id="approve">Approve</button>
+              <button id="save">Save</button>
+              <button id="addRow">Add Row</button>
+              <button class="danger" id="reject">Reject</button>
+            </div>
           </div>
           <div class="job-panel hidden" id="jobPanel">
             <div class="job-detail-line">
@@ -1316,6 +1645,14 @@ def app_html() -> str:
             </div>
             <div class="job-meter"><div class="job-meter-fill" id="jobMeterFill"></div></div>
             <div class="job-chunks" id="jobChunks"></div>
+          </div>
+        </section>
+        <section class="meta">
+          <div class="note-grid">
+            <textarea id="note">${escapeHtml(payload.divergence_note)}</textarea>
+            <select id="confidence">
+              ${["high", "medium", "low"].map((value) => `<option value="${value}" ${payload.confidence === value ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
           </div>
         </section>
         <div id="matrixView" class="${activeView === "matrix" ? "" : "hidden"}">
@@ -1370,7 +1707,7 @@ def app_html() -> str:
       attachMatrixControls();
       attachRowButtons();
       detail.querySelectorAll(".ref-chip").forEach((button) => {
-        button.addEventListener("click", () => jumpToRef(button.title));
+        button.addEventListener("click", () => jumpToRef(button.title, button));
       });
     }
 
@@ -1382,35 +1719,25 @@ def app_html() -> str:
         <section class="matrix-panel">
           <div class="matrix-head">
             <h3>Correspondence Matrix</h3>
-            <div class="bulk-actions">
-              <button id="selectAllRows">Select All</button>
-              <button id="rowPending">Rows Pending</button>
-              <button id="rowStrong">Rows Strong</button>
-              <button id="rowApprove">Rows Approve</button>
-              <button id="rowReject">Rows Reject</button>
-              <button class="danger" id="rowRemove">Remove Selected</button>
+            <div class="matrix-tools">
+              <label class="pane-sizer">
+                CUDA
+                <input id="paneSplit" type="range" min="25" max="75" value="${paneSplit}" aria-label="Adjust CUDA and Metal pane widths">
+                Metal
+              </label>
+              <div class="bulk-actions">
+                <button id="selectAllRows">Select All</button>
+                <button id="rowPending">Rows Pending</button>
+                <button id="rowStrong">Rows Strong</button>
+                <button id="rowApprove">Rows Approve</button>
+                <button id="rowReject">Rows Reject</button>
+                <button class="danger" id="rowRemove">Remove Selected</button>
+              </div>
             </div>
           </div>
-          <div class="path" style="padding: 0 12px 10px;">Both cells filled should mean exact, strong, or mild similarity. Weak, partial, or divergent candidates should be staggered into one-sided rows with blank opposite cells.</div>
-          <div class="matrix-scroll">
-            <table class="matrix">
-              <thead>
-                <tr>
-                  <th>Select</th>
-                  <th>Kind</th>
-                  <th>CUDA Ref</th>
-                  <th>CUDA</th>
-                  <th>Metal Ref</th>
-                  <th>Metal</th>
-                  <th>Relation</th>
-                  <th>Generated</th>
-                  <th>Row Status</th>
-                </tr>
-              </thead>
-              <tbody id="matrixBody">
-                ${rows.map((row) => renderMatrixRow(row)).join("")}
-              </tbody>
-            </table>
+          <div class="path matrix-hint">Both sides filled means exact, strong, or mild similarity. One-sided rows capture weak, partial, divergent, or unmatched behavior.</div>
+          <div class="matrix-rows" id="matrixBody">
+            ${rows.map((row) => renderMatrixRow(row)).join("")}
           </div>
         </section>
       `;
@@ -1421,27 +1748,45 @@ def app_html() -> str:
       const hasMetal = Boolean((row.metal || "").trim());
       const rowClass = hasCuda && hasMetal ? "aligned-row" : (hasCuda || hasMetal ? "staggered-row" : "unmatched-row");
       return `
-        <tr class="matrix-row ${rowClass} ${generated ? "generated-row" : ""}">
-          <td class="select-cell"><input type="checkbox" class="row-selected"></td>
-          <td><input class="row-kind" value="${escapeHtml(row.kind || "observation")}"></td>
-          <td>${renderRefInput("row-cuda-ref", row.cuda_ref || "")}</td>
-          <td class="${row.cuda ? "" : "blank-cell"}"><textarea class="row-cuda">${escapeHtml(row.cuda || "")}</textarea></td>
-          <td>${renderRefInput("row-metal-ref", row.metal_ref || "")}</td>
-          <td class="${row.metal ? "" : "blank-cell"}"><textarea class="row-metal">${escapeHtml(row.metal || "")}</textarea></td>
-          <td class="relation-cell"><textarea class="row-relation">${escapeHtml(row.relation || "")}</textarea></td>
-          <td>
+        <article class="matrix-row ${rowClass} ${generated ? "generated-row" : ""}">
+          <div class="select-cell"><input type="checkbox" class="row-selected" aria-label="Select matrix row"></div>
+          <div class="row-cell row-kind-wrap">
+            <span class="row-label">Kind</span>
+            <input class="row-kind" value="${escapeHtml(row.kind || "observation")}">
+            <span class="row-label">Status</span>
+            <select class="row-status">
+              ${["pending", "strong_candidate", "approved", "rejected"].map((value) => `<option value="${value}" ${(row.status || "pending") === value ? "selected" : ""}>${value}</option>`).join("")}
+            </select>
+          </div>
+          <div class="row-cell diff-cell cuda-side">
+            <div class="diff-head">
+              <span class="row-label">CUDA</span>
+              <span class="diff-op">-</span>
+            </div>
+            ${renderRefInput("row-cuda-ref", row.cuda_ref || "")}
+            <div class="inline-snippet" data-platform="cuda"></div>
+            <textarea class="row-cuda ${row.cuda ? "" : "blank-cell"}">${escapeHtml(row.cuda || "")}</textarea>
+          </div>
+          <div class="row-cell diff-cell metal-side">
+            <div class="diff-head">
+              <span class="row-label">Metal</span>
+              <span class="diff-op">+</span>
+            </div>
+            ${renderRefInput("row-metal-ref", row.metal_ref || "")}
+            <div class="inline-snippet" data-platform="metal"></div>
+            <textarea class="row-metal ${row.metal ? "" : "blank-cell"}">${escapeHtml(row.metal || "")}</textarea>
+          </div>
+          <div class="row-cell row-actions">
+            <span class="row-label">Row</span>
             <input type="hidden" class="row-generated-at" value="${escapeHtml(row.generated_at || "")}">
             <span class="path" title="${escapeHtml(row.generated_at || "Existing row")}">${escapeHtml(row.generated_at ? formatTimestamp(row.generated_at) : "existing")}</span>
-          </td>
-          <td>
-            <div class="row-actions">
-              <select class="row-status">
-                ${["pending", "strong_candidate", "approved", "rejected"].map((value) => `<option value="${value}" ${(row.status || "pending") === value ? "selected" : ""}>${value}</option>`).join("")}
-              </select>
-              <button type="button" class="remove-row">Remove</button>
-            </div>
-          </td>
-        </tr>
+            <button type="button" class="remove-row">Remove</button>
+          </div>
+          <details class="relationship-detail">
+            <summary>Relationship note</summary>
+            <textarea class="row-relation">${escapeHtml(row.relation || "")}</textarea>
+          </details>
+        </article>
       `;
     }
 
@@ -1527,7 +1872,7 @@ def app_html() -> str:
       body.insertAdjacentHTML("beforeend", freshRows.map((row) => renderMatrixRow(row, true)).join(""));
       attachRowButtons();
       detail.querySelectorAll(".ref-chip").forEach((button) => {
-        button.onclick = () => jumpToRef(button.title);
+        button.onclick = () => jumpToRef(button.title, button);
       });
       const rowsAdded = document.getElementById("jobRowsAdded");
       if (rowsAdded) {
@@ -1605,6 +1950,11 @@ def app_html() -> str:
     function attachMatrixControls() {
       const selectAll = document.getElementById("selectAllRows");
       if (!selectAll) return;
+      const paneSlider = document.getElementById("paneSplit");
+      if (paneSlider) {
+        paneSlider.value = String(paneSplit);
+        paneSlider.addEventListener("input", () => applyPaneSplit(paneSlider.value));
+      }
       selectAll.addEventListener("click", () => {
         const rows = Array.from(document.querySelectorAll(".row-selected"));
         const shouldCheck = rows.some((input) => !input.checked);
@@ -1634,11 +1984,30 @@ def app_html() -> str:
       attachRowButtons();
     }
 
-    function jumpToRef(ref) {
+    function jumpToRef(ref, sourceButton = null) {
       if (!ref || ref === "No reference") return;
       const platform = platformFromRef(ref);
       const line = lineFromRef(ref);
       const content = platform === "metal" ? currentPayload?.metal_content : currentPayload?.cuda_content;
+      const diffCell = sourceButton?.closest(".diff-cell");
+      const inlinePanel = diffCell?.querySelector(".inline-snippet");
+      if (inlinePanel) {
+        const isOpen = inlinePanel.classList.contains("open") && inlinePanel.dataset.ref === ref;
+        if (isOpen) {
+          inlinePanel.classList.remove("open");
+          inlinePanel.innerHTML = "";
+          inlinePanel.dataset.ref = "";
+          return;
+        }
+        inlinePanel.dataset.ref = ref;
+        inlinePanel.classList.add("open");
+        inlinePanel.innerHTML = `
+          <div class="path">${escapeHtml(ref)}</div>
+          ${renderInlineSnippet(content, line)}
+        `;
+        inlinePanel.scrollIntoView({ block: "nearest" });
+        return;
+      }
       const panel = document.getElementById("snippetPanel");
       if (!panel) return;
       panel.innerHTML = `
@@ -1699,7 +2068,7 @@ def app_html() -> str:
       } catch (error) {
         alert(error.message);
         button.disabled = false;
-        button.textContent = "Generate Candidate Matrix";
+        button.textContent = "Generate Matrix";
         status.textContent = "";
       }
     }
@@ -1725,14 +2094,14 @@ def app_html() -> str:
           }
           if (button) {
             button.disabled = false;
-            button.textContent = "Generate Candidate Matrix";
+            button.textContent = "Generate Matrix";
           }
           return;
         }
         if (job.status === "error") {
           if (button) {
             button.disabled = false;
-            button.textContent = "Generate Candidate Matrix";
+            button.textContent = "Generate Matrix";
           }
           if (status) status.textContent = `Generation failed: ${job.message}`;
           return;
@@ -1741,7 +2110,7 @@ def app_html() -> str:
       } catch (error) {
         if (button) {
           button.disabled = false;
-          button.textContent = "Generate Candidate Matrix";
+          button.textContent = "Generate Matrix";
         }
         if (status) status.textContent = error.message;
       }
