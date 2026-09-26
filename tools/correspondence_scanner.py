@@ -31,6 +31,7 @@ REGISTRY_PATH = PROJECT_ROOT / "docs" / "correspondence.md"
 DEFAULT_EMBED_URL = os.environ.get("CORRESPONDENCE_EMBED_URL", "").strip()
 DEFAULT_EMBED_MODEL = os.environ.get("CORRESPONDENCE_EMBED_MODEL", "").strip() or None
 EMBED_SIMILARITY_THRESHOLD = float(os.environ.get("CORRESPONDENCE_EMBED_THRESHOLD", "0.72"))
+PROMPT_CHAR_LIMIT = int(os.environ.get("CORRESPONDENCE_PROMPT_CHAR_LIMIT", "12000"))
 
 
 @dataclass
@@ -153,6 +154,12 @@ class LocalLLMClient:
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 completion = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+            message = f"Local LLM request failed: HTTP {exc.code}"
+            if detail:
+                message = f"{message}: {detail}"
+            raise RuntimeError(message) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"Local LLM request failed: {exc}") from exc
 
@@ -234,7 +241,7 @@ def analysis_draft_from_data(data: dict[str, object], cuda_path: Path) -> Analys
     )
 
 
-def trim_for_prompt(content: str, limit: int = 42000) -> str:
+def trim_for_prompt(content: str, limit: int = PROMPT_CHAR_LIMIT) -> str:
     if len(content) <= limit:
         return content
     head = content[: limit // 2]
