@@ -13,6 +13,8 @@ import ast
 import difflib
 import html
 import json
+import math
+import os
 import re
 import urllib.error
 import urllib.request
@@ -26,6 +28,9 @@ PACKAGE_ROOT = PROJECT_ROOT / "vllm_hook_plugins" / "vllm_hook_plugins"
 PENDING_PATH = PROJECT_ROOT / "pending_correspondence.json"
 REVIEW_HTML_PATH = PROJECT_ROOT / "docs" / "correspondence_review.html"
 REGISTRY_PATH = PROJECT_ROOT / "docs" / "correspondence.md"
+DEFAULT_EMBED_URL = os.environ.get("CORRESPONDENCE_EMBED_URL", "").strip()
+DEFAULT_EMBED_MODEL = os.environ.get("CORRESPONDENCE_EMBED_MODEL", "").strip() or None
+EMBED_SIMILARITY_THRESHOLD = float(os.environ.get("CORRESPONDENCE_EMBED_THRESHOLD", "0.72"))
 
 
 @dataclass
@@ -171,6 +176,45 @@ class LocalLLMClient:
                 },
             ],
         )
+
+
+class LocalEmbeddingClient:
+    """OpenAI-compatible local embedding client."""
+
+    def __init__(self, base_url: str, model: str | None = None, timeout: int = 60) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.timeout = timeout
+        self._cache: dict[str, list[float]] = {}
+
+    def embed(self, text: str) -> list[float]:
+        cache_key = f"{self.model or ''}\0{text}"
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        payload: dict[str, object] = {"input": text}
+        if self.model:
+            payload["model"] = self.model
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/v1/embeddings",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Local embedding request failed: {exc}") from exc
+
+        embedding = data["data"][0]["embedding"]
+        if not isinstance(embedding, list):
+            raise RuntimeError("Embedding endpoint returned an invalid embedding")
+        vector = [float(value) for value in embedding]
+        self._cache[cache_key] = vector
+        return vector
 
 
 def analysis_draft_from_data(data: dict[str, object], cuda_path: Path) -> AnalysisDraft:
@@ -403,12 +447,14 @@ def logical_name_from_path(path: Path, stem: str) -> str:
 
 def python_summary(path: Path) -> dict[str, object]:
     text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
     summary: dict[str, object] = {
-        "lines": len(text.splitlines()),
+        "lines": len(lines),
         "classes": [],
         "functions": [],
         "imports": [],
         "refs": {},
+        "snippets": {"classes": {}, "functions": {}},
     }
     try:
         tree = ast.parse(text)
@@ -419,13 +465,16 @@ def python_summary(path: Path) -> dict[str, object]:
     functions: list[str] = []
     imports: list[str] = []
     refs: dict[str, dict[str, str]] = {"classes": {}, "functions": {}, "imports": {}}
+    snippets: dict[str, dict[str, str]] = {"classes": {}, "functions": {}}
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef):
             classes.append(node.name)
             refs["classes"][node.name] = node_ref(path, node)
+            snippets["classes"][node.name] = node_source(lines, node)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             functions.append(node.name)
             refs["functions"].setdefault(node.name, node_ref(path, node))
+            snippets["functions"].setdefault(node.name, node_source(lines, node))
         elif isinstance(node, ast.Import):
             for alias in node.names:
                 imports.append(alias.name)
@@ -439,7 +488,16 @@ def python_summary(path: Path) -> dict[str, object]:
     summary["functions"] = sorted(set(functions))
     summary["imports"] = sorted(set(imports))
     summary["refs"] = refs
+    summary["snippets"] = snippets
     return summary
+
+
+def node_source(lines: list[str], node: ast.AST) -> str:
+    start = getattr(node, "lineno", None)
+    end = getattr(node, "end_lineno", start)
+    if not start or not end:
+        return ""
+    return "\n".join(lines[start - 1 : end])
 
 
 def node_ref(path: Path, node: ast.AST) -> str:
@@ -486,7 +544,12 @@ def metal_match_for(cuda_path: Path) -> Path | None:
     return None
 
 
-def build_entry(cuda_path: Path, metal_path: Path, llm: PlaceholderLLMClient) -> CorrespondenceEntry:
+def build_entry(
+    cuda_path: Path,
+    metal_path: Path,
+    llm: PlaceholderLLMClient,
+    embedder: LocalEmbeddingClient | None = None,
+) -> CorrespondenceEntry:
     draft = llm.analyze_pair(cuda_path, metal_path)
     cuda_summary = python_summary(cuda_path)
     metal_summary = python_summary(metal_path)
@@ -502,7 +565,7 @@ def build_entry(cuda_path: Path, metal_path: Path, llm: PlaceholderLLMClient) ->
         similarities=draft.similarities,
         differences=draft.differences,
         inspection_risks=draft.inspection_risks,
-        comparison_rows=draft.comparison_rows or heuristic_comparison_rows(cuda_summary, metal_summary),
+        comparison_rows=draft.comparison_rows or heuristic_comparison_rows(cuda_summary, metal_summary, embedder),
         summary={
             "cuda": cuda_summary,
             "metal": metal_summary,
@@ -511,7 +574,9 @@ def build_entry(cuda_path: Path, metal_path: Path, llm: PlaceholderLLMClient) ->
 
 
 def heuristic_comparison_rows(
-    cuda_summary: dict[str, object], metal_summary: dict[str, object]
+    cuda_summary: dict[str, object],
+    metal_summary: dict[str, object],
+    embedder: LocalEmbeddingClient | None = None,
 ) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = [
         {
@@ -534,24 +599,18 @@ def heuristic_comparison_rows(
         metal_items = [str(item) for item in metal_summary.get(key, [])]
         cuda_refs = dict(cuda_summary.get("refs", {}).get(key, {}))  # type: ignore[union-attr]
         metal_refs = dict(metal_summary.get("refs", {}).get(key, {}))  # type: ignore[union-attr]
-        grouped: dict[str, dict[str, str]] = {}
-        for item in cuda_items:
-            grouped.setdefault(normalize_symbol(item), {})["cuda"] = item
-        for item in metal_items:
-            grouped.setdefault(normalize_symbol(item), {})["metal"] = item
-        for normalized, sides in sorted(grouped.items()):
-            cuda_item = sides.get("cuda", "")
-            metal_item = sides.get("metal", "")
+        pairs = symbol_pairs(cuda_summary, metal_summary, key, cuda_items, metal_items, embedder)
+        for cuda_item, metal_item, similarity in pairs:
             rows.append(
                 {
-                    "kind": symbol_kind(kind, cuda_item, metal_item),
+                    "kind": symbol_kind(kind, cuda_item, metal_item, similarity),
                     "cuda": f"{label}: {cuda_item}" if cuda_item else "",
                     "cuda_ref": cuda_refs.get(cuda_item, ""),
                     "metal": f"{label}: {metal_item}" if metal_item else "",
                     "metal_ref": metal_refs.get(metal_item, ""),
-                    "relation": relation_for_symbol(cuda_item, metal_item, normalized),
+                    "relation": relation_for_symbol(cuda_item, metal_item, similarity),
                     "status": "pending",
-                    "confidence": "medium",
+                    "confidence": confidence_for_symbol(cuda_item, metal_item, similarity),
                 }
             )
 
@@ -575,6 +634,105 @@ def heuristic_comparison_rows(
     return rows
 
 
+def symbol_pairs(
+    cuda_summary: dict[str, object],
+    metal_summary: dict[str, object],
+    key: str,
+    cuda_items: list[str],
+    metal_items: list[str],
+    embedder: LocalEmbeddingClient | None,
+) -> list[tuple[str, str, float | None]]:
+    grouped: dict[str, dict[str, str]] = {}
+    for item in cuda_items:
+        grouped.setdefault(normalize_symbol(item), {})["cuda"] = item
+    for item in metal_items:
+        grouped.setdefault(normalize_symbol(item), {})["metal"] = item
+
+    paired: list[tuple[str, str, float | None]] = [
+        (sides.get("cuda", ""), sides.get("metal", ""), None)
+        for _, sides in sorted(grouped.items())
+    ]
+    if embedder is None:
+        return paired
+
+    used_cuda = {cuda for cuda, metal, _ in paired if cuda and metal}
+    used_metal = {metal for cuda, metal, _ in paired if cuda and metal}
+    cuda_unmatched = [item for item in cuda_items if item not in used_cuda]
+    metal_unmatched = [item for item in metal_items if item not in used_metal]
+    semantic_pairs = semantic_symbol_pairs(
+        cuda_summary,
+        metal_summary,
+        key,
+        cuda_unmatched,
+        metal_unmatched,
+        embedder,
+    )
+    semantic_cuda = {cuda for cuda, _, _ in semantic_pairs}
+    semantic_metal = {metal for _, metal, _ in semantic_pairs}
+
+    result = [
+        pair
+        for pair in paired
+        if not ((pair[0] and not pair[1] and pair[0] in semantic_cuda) or (pair[1] and not pair[0] and pair[1] in semantic_metal))
+    ]
+    result.extend(semantic_pairs)
+    return sorted(result, key=lambda item: (item[0] or item[1], item[1]))
+
+
+def semantic_symbol_pairs(
+    cuda_summary: dict[str, object],
+    metal_summary: dict[str, object],
+    key: str,
+    cuda_items: list[str],
+    metal_items: list[str],
+    embedder: LocalEmbeddingClient,
+) -> list[tuple[str, str, float]]:
+    cuda_snippets = dict(cuda_summary.get("snippets", {}).get(key, {}))  # type: ignore[union-attr]
+    metal_snippets = dict(metal_summary.get("snippets", {}).get(key, {}))  # type: ignore[union-attr]
+    scored: list[tuple[float, str, str]] = []
+    for cuda_item in cuda_items:
+        cuda_text = semantic_text(cuda_item, str(cuda_snippets.get(cuda_item, "")))
+        if not cuda_text:
+            continue
+        cuda_vector = embedder.embed(cuda_text)
+        for metal_item in metal_items:
+            metal_text = semantic_text(metal_item, str(metal_snippets.get(metal_item, "")))
+            if not metal_text:
+                continue
+            score = cosine_similarity(cuda_vector, embedder.embed(metal_text))
+            if score >= EMBED_SIMILARITY_THRESHOLD:
+                scored.append((score, cuda_item, metal_item))
+
+    pairs: list[tuple[str, str, float]] = []
+    used_cuda: set[str] = set()
+    used_metal: set[str] = set()
+    for score, cuda_item, metal_item in sorted(scored, reverse=True):
+        if cuda_item in used_cuda or metal_item in used_metal:
+            continue
+        used_cuda.add(cuda_item)
+        used_metal.add(metal_item)
+        pairs.append((cuda_item, metal_item, score))
+    return pairs
+
+
+def semantic_text(name: str, snippet: str) -> str:
+    text = snippet.strip()
+    if not text:
+        return name
+    return f"{name}\n{text}"
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    if len(left) != len(right) or not left:
+        return 0.0
+    dot = sum(a * b for a, b in zip(left, right))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if left_norm == 0.0 or right_norm == 0.0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
 def normalize_symbol(name: str) -> str:
     normalized = name.lower()
     for token in ("metal", "cuda", "mlx", "torch"):
@@ -583,20 +741,35 @@ def normalize_symbol(name: str) -> str:
     return normalized
 
 
-def relation_for_symbol(cuda_item: str, metal_item: str, normalized: str) -> str:
+def relation_for_symbol(cuda_item: str, metal_item: str, similarity: float | None = None) -> str:
     if cuda_item and metal_item:
+        if similarity is not None:
+            return (
+                "Embedding similarity suggests these elements may correspond "
+                f"(score {similarity:.2f}); inspect whether behavior and contract match."
+            )
         if cuda_item == metal_item:
             return "Same named element appears on both platforms; inspect whether behavior and contract match."
         return "Likely platform-named counterparts; inspect whether the Metal implementation preserves the CUDA contract."
     return relation_for_presence(bool(cuda_item), bool(metal_item))
 
 
-def symbol_kind(base_kind: str, cuda_item: str, metal_item: str) -> str:
+def symbol_kind(base_kind: str, cuda_item: str, metal_item: str, similarity: float | None = None) -> str:
     if cuda_item and metal_item:
+        if similarity is not None:
+            return "semantic"
         if cuda_item == metal_item:
             return "exact"
         return "mild"
     return base_kind
+
+
+def confidence_for_symbol(cuda_item: str, metal_item: str, similarity: float | None = None) -> str:
+    if similarity is None:
+        return "medium"
+    if similarity >= 0.84:
+        return "high"
+    return "medium"
 
 
 def relation_for_presence(has_cuda: bool, has_metal: bool) -> str:
@@ -607,14 +780,18 @@ def relation_for_presence(has_cuda: bool, has_metal: bool) -> str:
     return "Metal-only element; inspect whether this is wrapper, adapter, reconstruction, conversion, or platform-guard logic."
 
 
-def scan() -> list[CorrespondenceEntry]:
+def scan(
+    embedding_url: str = DEFAULT_EMBED_URL,
+    embedding_model: str | None = DEFAULT_EMBED_MODEL,
+) -> list[CorrespondenceEntry]:
     llm = PlaceholderLLMClient()
+    embedder = LocalEmbeddingClient(embedding_url, model=embedding_model) if embedding_url else None
     entries: list[CorrespondenceEntry] = []
     for cuda_path in candidate_cuda_files():
         metal_path = metal_match_for(cuda_path)
         if metal_path is None:
             continue
-        entries.append(build_entry(cuda_path, metal_path, llm))
+        entries.append(build_entry(cuda_path, metal_path, llm, embedder))
     return entries
 
 
@@ -749,9 +926,19 @@ def main() -> int:
     parser.add_argument("--html", type=Path, default=REVIEW_HTML_PATH)
     parser.add_argument("--no-html", action="store_true")
     parser.add_argument("--refresh-matrix", action="store_true")
+    parser.add_argument(
+        "--embedding-url",
+        default=DEFAULT_EMBED_URL,
+        help="OpenAI-compatible embedding base URL, such as http://127.0.0.1:8034.",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=DEFAULT_EMBED_MODEL,
+        help="Optional embedding model id to send to /v1/embeddings.",
+    )
     args = parser.parse_args()
 
-    entries = scan()
+    entries = scan(embedding_url=args.embedding_url, embedding_model=args.embedding_model)
     args.pending.parent.mkdir(parents=True, exist_ok=True)
     write_pending(entries, args.pending, refresh_matrix=args.refresh_matrix)
     ensure_registry_template(REGISTRY_PATH)

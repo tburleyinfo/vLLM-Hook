@@ -55,6 +55,51 @@ the previous matrix:
 python3 tools/correspondence_scanner.py --refresh-matrix
 ```
 
+## Apple Silicon Local Model Workflow
+
+For faster semantic matching on Apple Silicon, run a small embedding model for
+candidate discovery and a separate chat model for optional explanation.
+
+Start the embedding server on port `8034`:
+
+```bash
+llama-server \
+  -hf Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0 \
+  --embedding \
+  --pooling last \
+  -c 8192 \
+  -ngl auto \
+  --host 127.0.0.1 \
+  --port 8034
+```
+
+Start the chat server on port `8033`:
+
+```bash
+llama-server \
+  -hf unsloth/Qwen3.5-4B-GGUF:Q4_K_M \
+  --jinja \
+  -c 16000 \
+  -fa on \
+  -ngl auto \
+  --host 127.0.0.1 \
+  --port 8033 \
+  --reasoning off
+```
+
+Then scan with embeddings enabled:
+
+```bash
+CORRESPONDENCE_EMBED_URL=http://127.0.0.1:8034 \
+CORRESPONDENCE_LLM_URL=http://127.0.0.1:8033 \
+python3 tools/correspondence_scanner.py --refresh-matrix
+```
+
+The scanner still uses deterministic file pairing first. The embedding server
+only improves class/function row alignment by comparing code-body similarity.
+The chat server remains optional and is only used when the review UI generates
+candidate notes.
+
 ## Review UI
 
 Start the local UI with:
@@ -75,11 +120,13 @@ comparison rows. Saving changes updates `pending_correspondence.json` and
 regenerates `docs/correspondence.md`.
 
 The server supports optional analysis through an OpenAI-compatible local LLM
-endpoint at:
+endpoint. By default it uses:
 
 ```text
 http://127.0.0.1:8033
 ```
+
+Set `CORRESPONDENCE_LLM_URL` to point at a different chat server.
 
 That LLM path is optional. The default scanner output remains deterministic and
 does not require a model or network access.

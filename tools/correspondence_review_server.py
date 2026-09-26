@@ -7,6 +7,7 @@ import argparse
 import difflib
 import json
 import mimetypes
+import os
 import re
 import sys
 import threading
@@ -25,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PENDING_PATH = PROJECT_ROOT / "pending_correspondence.json"
 REGISTRY_PATH = PROJECT_ROOT / "docs" / "correspondence.md"
-DEFAULT_LLM_URL = "http://127.0.0.1:8033"
+DEFAULT_LLM_URL = os.environ.get("CORRESPONDENCE_LLM_URL", "http://127.0.0.1:8033")
 JOBS: dict[str, dict[str, Any]] = {}
 JOBS_LOCK = threading.Lock()
 
