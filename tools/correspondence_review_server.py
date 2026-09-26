@@ -16,6 +16,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import asdict
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,6 +30,8 @@ REGISTRY_PATH = PROJECT_ROOT / "docs" / "correspondence.md"
 DEFAULT_LLM_URL = os.environ.get("CORRESPONDENCE_LLM_URL", "http://127.0.0.1:8033")
 JOBS: dict[str, dict[str, Any]] = {}
 JOBS_LOCK = threading.Lock()
+ENTRY_LOCK = threading.Lock()
+MAX_ANALYSIS_CHUNKS = int(os.environ.get("CORRESPONDENCE_ANALYSIS_CHUNKS", "12"))
 
 
 def load_entries() -> list[dict[str, Any]]:
@@ -39,6 +42,10 @@ def load_entries() -> list[dict[str, Any]]:
 
 def save_entries(entries: list[dict[str, Any]]) -> None:
     PENDING_PATH.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+
+
+def utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def markdown_escape(value: object) -> str:
@@ -210,38 +217,220 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         return dict(job) if job else None
 
 
+def row_key(row: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        str(row.get("kind") or "").strip(),
+        str(row.get("cuda_ref") or "").strip(),
+        str(row.get("cuda") or "").strip(),
+        str(row.get("metal_ref") or "").strip(),
+        str(row.get("metal") or "").strip(),
+    )
+
+
+def merge_rows(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = list(existing)
+    seen = {row_key(row) for row in merged}
+    for row in incoming:
+        normalized = {**row, "status": row.get("status") or "pending"}
+        if not normalized.get("generated_at"):
+            normalized["generated_at"] = utc_timestamp()
+        key = row_key(normalized)
+        if key in seen:
+            continue
+        merged.append(normalized)
+        seen.add(key)
+    return merged
+
+
+def publish_rows(job_id: str, entry_id: str, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    with ENTRY_LOCK:
+        entries = load_entries()
+        entry = find_entry(entries, entry_id)
+        if entry is None:
+            raise ValueError("entry not found")
+        entry["comparison_rows"] = merge_rows(entry.get("comparison_rows", []), rows)
+        save_entries(entries)
+        render_registry(entries)
+    job = get_job(job_id) or {}
+    partial_rows = merge_rows(job.get("partial_rows", []), rows)
+    set_job(job_id, partial_rows=partial_rows)
+
+
+def chunk_seed_rows(entry: dict[str, Any]) -> list[dict[str, Any]]:
+    rows = entry.get("comparison_rows") or []
+    if not rows:
+        return [{"kind": "file", "cuda": entry.get("cuda_path", ""), "metal": entry.get("metal_path", "")}]
+    return rows[:MAX_ANALYSIS_CHUNKS]
+
+
+def chunk_prompt(entry: dict[str, Any], seed_row: dict[str, Any], chunk_index: int, total_chunks: int, web_context: str) -> str:
+    context = ""
+    if web_context.strip():
+        context = f"\nOptional external context:\n{web_context.strip()}\n"
+    return f"""You are refining one chunk of a CUDA/Metal correspondence matrix.
+
+Return only JSON with this shape:
+{{
+  "comparison_rows": [
+    {{
+      "kind": "exact | strong | mild | weak | partial | divergent | cuda_only | metal_only | no_match | risk | contract | artifact | lifecycle | dependency",
+      "cuda": "CUDA-side code fact, method, block, or behavior. Leave blank if absent.",
+      "cuda_ref": "CUDA path with line or range. Leave blank if absent or uncertain.",
+      "metal": "Metal-side code fact, method, block, or behavior. Leave blank if absent.",
+      "metal_ref": "Metal path with line or range. Leave blank if absent or uncertain.",
+      "relation": "Explain exact match, loose analogy, divergence, missing counterpart, or inspection risk.",
+      "status": "pending",
+      "confidence": "high | medium | low"
+    }}
+  ],
+  "similarities": ["optional concise notes"],
+  "differences": ["optional concise notes"],
+  "inspection_risks": ["optional concise notes"],
+  "divergence_note": "optional one-paragraph update",
+  "confidence": "high | medium | low"
+}}
+
+Chunk {chunk_index + 1} of {total_chunks}.
+CUDA path: {entry.get("cuda_path", "")}
+Metal path: {entry.get("metal_path", "")}
+Existing seed row:
+{json.dumps(seed_row, indent=2)}
+{context}
+Focus only on this seed row. You may split weak or divergent matches into
+adjacent one-sided rows. Do not regenerate the whole file matrix.
+"""
+
+
+def list_extend_unique(existing: list[Any], incoming: list[Any]) -> list[str]:
+    values = [str(item) for item in existing if str(item).strip()]
+    seen = set(values)
+    for item in incoming:
+        text = str(item).strip()
+        if text and text not in seen:
+            values.append(text)
+            seen.add(text)
+    return values
+
+
 def analyze_entry_job(job_id: str, entry_id: str, web_context: str) -> None:
-    set_job(job_id, status="running", message="Generating candidate rows")
+    generation_started_at = utc_timestamp()
+    set_job(
+        job_id,
+        status="running",
+        message="Preparing candidate row chunks",
+        generation_started_at=generation_started_at,
+        partial_rows=[],
+        completed_chunks=0,
+        total_chunks=0,
+        failed_chunks=[],
+        progress=0,
+    )
     try:
-        from correspondence_scanner import LocalLLMClient
+        from correspondence_scanner import LocalLLMClient, comparison_rows, parse_json_object
 
         entries = load_entries()
         entry = find_entry(entries, entry_id)
         if entry is None:
             raise ValueError("entry not found")
+        with ENTRY_LOCK:
+            entries = load_entries()
+            entry = find_entry(entries, entry_id)
+            if entry is None:
+                raise ValueError("entry not found")
+            entry["generation_started_at"] = generation_started_at
+            entry["generation_completed_at"] = ""
+            save_entries(entries)
 
         client = LocalLLMClient(DEFAULT_LLM_URL, timeout=300)
-        draft = client.analyze_pair(
-            PROJECT_ROOT / entry["cuda_path"],
-            PROJECT_ROOT / entry["metal_path"],
-            web_context=web_context,
-        )
-        entry["divergence_note"] = draft.divergence_note
-        entry["confidence"] = draft.confidence
-        entry["reason"] = draft.reason
-        entry["similarities"] = draft.similarities
-        entry["differences"] = draft.differences
-        entry["inspection_risks"] = draft.inspection_risks
-        if draft.comparison_rows:
-            entry["comparison_rows"] = [
-                {**row, "status": row.get("status") or "pending"}
-                for row in draft.comparison_rows
-            ]
-        save_entries(entries)
-        render_registry(entries)
-        set_job(job_id, status="done", message="Candidate matrix generated")
+        models = client.list_models()
+        if not models:
+            raise RuntimeError("No local LLM models were returned by /v1/models")
+        model = client.model or models[0]
+
+        chunks = chunk_seed_rows(entry)
+        total_chunks = len(chunks)
+        set_job(job_id, total_chunks=total_chunks, message=f"Running 0 of {total_chunks} row chunks")
+        summary_updates: dict[str, list[str]] = {"similarities": [], "differences": [], "inspection_risks": []}
+        failed_chunks: list[dict[str, Any]] = []
+        last_note = ""
+        last_confidence = ""
+
+        for index, seed_row in enumerate(chunks):
+            set_job(
+                job_id,
+                status="running",
+                message=f"Generating row chunk {index + 1} of {total_chunks}",
+                progress=index / total_chunks if total_chunks else 0,
+            )
+            try:
+                content = client.chat_json(
+                    model=model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You generate small chunks of candidate correspondence tables. "
+                                "Be concrete and concise. Return only valid JSON."
+                            ),
+                        },
+                        {"role": "user", "content": chunk_prompt(entry, seed_row, index, total_chunks, web_context)},
+                    ],
+                )
+                try:
+                    data = parse_json_object(content)
+                except json.JSONDecodeError:
+                    data = parse_json_object(client.repair_json(model, content))
+                rows = comparison_rows(data.get("comparison_rows"))
+                publish_rows(job_id, entry_id, rows)
+                for key in summary_updates:
+                    summary_updates[key] = list_extend_unique(summary_updates[key], data.get(key) or [])
+                last_note = str(data.get("divergence_note") or last_note)
+                last_confidence = str(data.get("confidence") or last_confidence)
+            except Exception as exc:
+                failed_chunks.append({"chunk": index + 1, "message": str(exc), "seed_row": seed_row})
+            completed = index + 1
+            set_job(
+                job_id,
+                completed_chunks=completed,
+                failed_chunks=failed_chunks,
+                progress=completed / total_chunks if total_chunks else 1,
+            )
+
+        with ENTRY_LOCK:
+            entries = load_entries()
+            entry = find_entry(entries, entry_id)
+            if entry is None:
+                raise ValueError("entry not found")
+            for key, values in summary_updates.items():
+                entry[key] = list_extend_unique(entry.get(key, []), values)
+            if last_note:
+                entry["divergence_note"] = last_note
+            if last_confidence in {"high", "medium", "low"}:
+                entry["confidence"] = last_confidence
+            entry["generation_started_at"] = generation_started_at
+            entry["generation_completed_at"] = utc_timestamp()
+            save_entries(entries)
+            render_registry(entries)
+
+        status = "partial" if failed_chunks else "done"
+        message = "Candidate matrix generated"
+        if failed_chunks:
+            message = f"Generated with {len(failed_chunks)} failed chunk(s)"
+        set_job(job_id, status=status, message=message, progress=1, generation_completed_at=entry["generation_completed_at"])
     except Exception as exc:
-        set_job(job_id, status="error", message=str(exc))
+        failed_at = utc_timestamp()
+        try:
+            with ENTRY_LOCK:
+                entries = load_entries()
+                entry = find_entry(entries, entry_id)
+                if entry is not None:
+                    entry["generation_started_at"] = generation_started_at
+                    entry["generation_completed_at"] = failed_at
+                    save_entries(entries)
+        finally:
+            set_job(job_id, status="error", message=str(exc), generation_completed_at=failed_at)
 
 
 def app_html() -> str:
@@ -609,6 +798,14 @@ def app_html() -> str:
     .matrix-row.unmatched-row td {
       background: var(--unmatchedBg);
     }
+    .matrix-row.generated-row td {
+      box-shadow: inset 3px 0 0 var(--accent);
+      animation: generatedPulse 3s ease-out;
+    }
+    @keyframes generatedPulse {
+      0% { background: var(--accentSoft); }
+      100% { background: inherit; }
+    }
     .matrix th:nth-child(1), .matrix td:nth-child(1) { width: 110px; }
     .matrix th:nth-child(2), .matrix td:nth-child(2) { width: 120px; }
     .matrix th:nth-child(3), .matrix td:nth-child(3),
@@ -616,7 +813,8 @@ def app_html() -> str:
     .matrix th:nth-child(4), .matrix td:nth-child(4),
     .matrix th:nth-child(6), .matrix td:nth-child(6) { width: 140px; }
     .matrix th:nth-child(7), .matrix td:nth-child(7) { width: 26%; }
-    .matrix th:nth-child(8), .matrix td:nth-child(8) { width: 96px; }
+    .matrix th:nth-child(8), .matrix td:nth-child(8) { width: 130px; }
+    .matrix th:nth-child(9), .matrix td:nth-child(9) { width: 96px; }
     .matrix textarea, .matrix input {
       width: 100%;
       min-height: 74px;
@@ -692,6 +890,69 @@ def app_html() -> str:
     .job-status {
       color: var(--muted);
       font-size: 13px;
+    }
+    .job-panel {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panelSoft);
+    }
+    .job-panel.hidden { display: none; }
+    .job-meter {
+      height: 8px;
+      border-radius: 999px;
+      background: var(--line);
+      overflow: hidden;
+    }
+    .job-meter-fill {
+      height: 100%;
+      width: 0%;
+      background: var(--accent);
+      transition: width 200ms ease;
+    }
+    .job-detail-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .job-chunks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+    }
+    .chunk-dot {
+      width: 18px;
+      height: 18px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1;
+    }
+    .chunk-dot.done {
+      border-color: var(--accent);
+      background: var(--accentSoft);
+      color: var(--accent);
+    }
+    .chunk-dot.running {
+      border-color: var(--warn);
+      color: var(--warn);
+    }
+    .chunk-dot.failed {
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+    .new-row-note {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
     }
     .snippet-panel {
       background: var(--panel);
@@ -1028,6 +1289,7 @@ def app_html() -> str:
           <div class="paths">
             <div><strong>CUDA</strong> <code>${escapeHtml(payload.cuda_path)}</code></div>
             <div><strong>Metal</strong> <code>${escapeHtml(payload.metal_path)}</code></div>
+            ${payload.generation_started_at ? `<div><strong>Last generation</strong> <code>${escapeHtml(formatTimestamp(payload.generation_started_at))}</code>${payload.generation_completed_at ? ` to <code>${escapeHtml(formatTimestamp(payload.generation_completed_at))}</code>` : " running"}</div>` : ""}
           </div>
           <div class="note-grid">
             <textarea id="note">${escapeHtml(payload.divergence_note)}</textarea>
@@ -1043,7 +1305,18 @@ def app_html() -> str:
             <button id="addRow">Add Matrix Row</button>
             <button class="danger" id="reject">Reject</button>
           </div>
-          <div class="job-status" id="jobStatus"></div>
+          <div class="job-panel hidden" id="jobPanel">
+            <div class="job-detail-line">
+              <span class="job-status" id="jobStatus"></span>
+              <span id="jobRowsAdded"></span>
+            </div>
+            <div class="job-detail-line">
+              <span id="jobStartedAt"></span>
+              <span id="jobCompletedAt"></span>
+            </div>
+            <div class="job-meter"><div class="job-meter-fill" id="jobMeterFill"></div></div>
+            <div class="job-chunks" id="jobChunks"></div>
+          </div>
         </section>
         <div id="matrixView" class="${activeView === "matrix" ? "" : "hidden"}">
           <div id="snippetPanel"></div>
@@ -1130,6 +1403,7 @@ def app_html() -> str:
                   <th>Metal Ref</th>
                   <th>Metal</th>
                   <th>Relation</th>
+                  <th>Generated</th>
                   <th>Row Status</th>
                 </tr>
               </thead>
@@ -1142,12 +1416,12 @@ def app_html() -> str:
       `;
     }
 
-    function renderMatrixRow(row) {
+    function renderMatrixRow(row, generated = false) {
       const hasCuda = Boolean((row.cuda || "").trim());
       const hasMetal = Boolean((row.metal || "").trim());
       const rowClass = hasCuda && hasMetal ? "aligned-row" : (hasCuda || hasMetal ? "staggered-row" : "unmatched-row");
       return `
-        <tr class="matrix-row ${rowClass}">
+        <tr class="matrix-row ${rowClass} ${generated ? "generated-row" : ""}">
           <td class="select-cell"><input type="checkbox" class="row-selected"></td>
           <td><input class="row-kind" value="${escapeHtml(row.kind || "observation")}"></td>
           <td>${renderRefInput("row-cuda-ref", row.cuda_ref || "")}</td>
@@ -1155,6 +1429,10 @@ def app_html() -> str:
           <td>${renderRefInput("row-metal-ref", row.metal_ref || "")}</td>
           <td class="${row.metal ? "" : "blank-cell"}"><textarea class="row-metal">${escapeHtml(row.metal || "")}</textarea></td>
           <td class="relation-cell"><textarea class="row-relation">${escapeHtml(row.relation || "")}</textarea></td>
+          <td>
+            <input type="hidden" class="row-generated-at" value="${escapeHtml(row.generated_at || "")}">
+            <span class="path" title="${escapeHtml(row.generated_at || "Existing row")}">${escapeHtml(row.generated_at ? formatTimestamp(row.generated_at) : "existing")}</span>
+          </td>
           <td>
             <div class="row-actions">
               <select class="row-status">
@@ -1209,9 +1487,105 @@ def app_html() -> str:
         metal_ref: row.querySelector(".row-metal-ref").value.trim(),
         metal: row.querySelector(".row-metal").value.trim(),
         relation: row.querySelector(".row-relation").value.trim(),
+        generated_at: row.querySelector(".row-generated-at")?.value.trim() || "",
         status: row.querySelector(".row-status").value,
         confidence: document.getElementById("confidence").value,
       })).filter((row) => row.kind || row.cuda_ref || row.cuda || row.metal_ref || row.metal || row.relation);
+    }
+
+    function matrixRowKey(row) {
+      return [
+        row.kind || "",
+        row.cuda_ref || "",
+        row.cuda || "",
+        row.metal_ref || "",
+        row.metal || "",
+      ].map((value) => String(value).trim()).join("\\u241f");
+    }
+
+    function appendGeneratedRows(rows) {
+      if (!Array.isArray(rows) || !rows.length) return;
+      const body = document.getElementById("matrixBody");
+      if (!body) return;
+      const existingRows = collectMatrixRows();
+      const hasOnlyPlaceholder = existingRows.length === 1
+        && existingRows[0].relation === "No matrix rows yet."
+        && !existingRows[0].cuda
+        && !existingRows[0].metal;
+      if (hasOnlyPlaceholder) {
+        body.innerHTML = "";
+        existingRows.length = 0;
+      }
+      const seen = new Set(existingRows.map(matrixRowKey));
+      const freshRows = rows.filter((row) => {
+        const key = matrixRowKey(row);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      if (!freshRows.length) return;
+      body.insertAdjacentHTML("beforeend", freshRows.map((row) => renderMatrixRow(row, true)).join(""));
+      attachRowButtons();
+      detail.querySelectorAll(".ref-chip").forEach((button) => {
+        button.onclick = () => jumpToRef(button.title);
+      });
+      const rowsAdded = document.getElementById("jobRowsAdded");
+      if (rowsAdded) {
+        rowsAdded.className = "new-row-note";
+        rowsAdded.textContent = `${freshRows.length} new row${freshRows.length === 1 ? "" : "s"} added`;
+      }
+    }
+
+    function formatJobStatus(job) {
+      const parts = [job.message || job.status || ""];
+      if (job.total_chunks) {
+        parts.push(`${job.completed_chunks || 0}/${job.total_chunks} chunks`);
+      }
+      if (job.failed_chunks?.length) {
+        parts.push(`${job.failed_chunks.length} failed`);
+      }
+      return parts.filter(Boolean).join(" · ");
+    }
+
+    function formatTimestamp(value) {
+      if (!value) return "";
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return String(value);
+      return date.toLocaleString();
+    }
+
+    function renderJobChunks(job) {
+      const total = Number(job.total_chunks || 0);
+      if (!total) return "";
+      const completed = Number(job.completed_chunks || 0);
+      const failed = new Set((job.failed_chunks || []).map((item) => Number(item.chunk)));
+      const running = job.status === "running" ? completed + 1 : 0;
+      const dots = [];
+      for (let index = 1; index <= total; index += 1) {
+        let state = "";
+        if (failed.has(index)) state = "failed";
+        else if (index <= completed) state = "done";
+        else if (index === running) state = "running";
+        dots.push(`<span class="chunk-dot ${state}" title="Chunk ${index}: ${state || "queued"}">${index}</span>`);
+      }
+      return dots.join("");
+    }
+
+    function updateJobPanel(job) {
+      const panel = document.getElementById("jobPanel");
+      const status = document.getElementById("jobStatus");
+      const meter = document.getElementById("jobMeterFill");
+      const chunks = document.getElementById("jobChunks");
+      const startedAt = document.getElementById("jobStartedAt");
+      const completedAt = document.getElementById("jobCompletedAt");
+      if (!panel || !status || !meter || !chunks) return;
+      panel.classList.remove("hidden");
+      status.textContent = formatJobStatus(job);
+      const progress = Math.max(0, Math.min(1, Number(job.progress || 0)));
+      meter.style.width = `${Math.round(progress * 100)}%`;
+      chunks.innerHTML = renderJobChunks(job);
+      if (startedAt) startedAt.textContent = job.generation_started_at ? `Started ${formatTimestamp(job.generation_started_at)}` : "";
+      if (completedAt) completedAt.textContent = job.generation_completed_at ? `Finished ${formatTimestamp(job.generation_completed_at)}` : "";
     }
 
     function selectedRows() {
@@ -1307,9 +1681,13 @@ def app_html() -> str:
     async function analyzeEntry() {
       const button = document.getElementById("analyze");
       const status = document.getElementById("jobStatus");
+      const panel = document.getElementById("jobPanel");
+      const rowsAdded = document.getElementById("jobRowsAdded");
       button.disabled = true;
       button.textContent = "Generating...";
-      status.textContent = "Queued candidate generation...";
+      if (panel) panel.classList.remove("hidden");
+      if (status) status.textContent = "Queued candidate generation...";
+      if (rowsAdded) rowsAdded.textContent = "";
       try {
         const webContext = document.getElementById("webContext").value;
         const payload = await api("/api/analyze", {
@@ -1331,10 +1709,23 @@ def app_html() -> str:
       const button = document.getElementById("analyze");
       try {
         const job = await api(`/api/job?id=${encodeURIComponent(jobId)}`);
-        if (status) status.textContent = job.message || job.status;
-        if (job.status === "done") {
+        updateJobPanel(job);
+        if (selectedId === entryId) {
+          appendGeneratedRows(job.partial_rows || []);
+        }
+        if (job.status === "done" || job.status === "partial") {
           if (selectedId === entryId) {
+            const note = document.getElementById("note");
+            const confidence = document.getElementById("confidence");
+            const currentRows = collectMatrixRows();
             await loadEntries(true);
+            if (note && document.getElementById("note")) document.getElementById("note").value = note.value;
+            if (confidence && document.getElementById("confidence")) document.getElementById("confidence").value = confidence.value;
+            appendGeneratedRows(currentRows);
+          }
+          if (button) {
+            button.disabled = false;
+            button.textContent = "Generate Candidate Matrix";
           }
           return;
         }
