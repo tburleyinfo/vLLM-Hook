@@ -204,6 +204,129 @@ def web_results_to_context(results: list[dict[str, str]]) -> str:
     )
 
 
+def empty_web_context(query: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "query": query,
+        "provider": "duckduckgo_html",
+        "provider_status": "blocked",
+        "results": [],
+        "context": "",
+        "message": f"Web context provider was unavailable: {exc}",
+    }
+
+
+def candidate_context_query(entry: dict[str, Any]) -> str:
+    parts = [
+        str(entry.get("logical_component") or ""),
+        str(entry.get("cuda_path") or ""),
+        str(entry.get("metal_path") or ""),
+        "vLLM Hook CUDA Metal parity",
+    ]
+    return " ".join(part for part in parts if part.strip())
+
+
+def row_context_query(entry: dict[str, Any], row: dict[str, Any]) -> str:
+    parts = [
+        str(entry.get("logical_component") or ""),
+        str(row.get("kind") or ""),
+        str(row.get("cuda_ref") or row.get("cuda") or ""),
+        str(row.get("metal_ref") or row.get("metal") or ""),
+        "vLLM Hook CUDA Metal parity",
+    ]
+    return " ".join(part for part in parts if part.strip())
+
+
+def truncate_text(value: object, limit: int) -> str:
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n...[truncated]"
+
+
+def compact_relation_row(row: dict[str, Any]) -> dict[str, str]:
+    fields = ("kind", "cuda_ref", "cuda", "metal_ref", "metal", "relation", "status", "confidence")
+    return {field: truncate_text(row.get(field, ""), 1200) for field in fields if str(row.get(field, "")).strip()}
+
+
+def explanation_prompt(entry: dict[str, Any], row: dict[str, Any], external_context: str) -> str:
+    context = ""
+    if external_context.strip():
+        context = f"\nReviewer guidance or optional context:\n{truncate_text(external_context, 3000)}\n"
+    current_relation = truncate_text(row.get("relation", ""), 1800)
+    return f"""Regenerate only the Relationship note for one row in a CUDA/Metal correspondence candidate.
+
+Return only JSON with this shape:
+{{
+  "relation": "One concise relationship note for this row.",
+  "confidence": "high | medium | low"
+}}
+
+Do not add or rewrite comparison_rows. Do not update the candidate summary note.
+Follow reviewer edit instructions in the guidance/context field unless they conflict with the selected row.
+If the reviewer asks to paraphrase, rewrite the current relationship note with different wording while preserving its meaning.
+The returned relation must be a complete replacement for the current relationship note, not a small appended edit.
+Do not claim external context is correct unless it is supported by the selected row and candidate data.
+
+Logical component: {entry.get("logical_component", "")}
+CUDA path: {entry.get("cuda_path", "")}
+Metal path: {entry.get("metal_path", "")}
+
+Selected row:
+{json.dumps(compact_relation_row(row), indent=2)}
+
+Current relationship note to replace:
+{current_relation}
+
+Current candidate summary note:
+{truncate_text(entry.get("divergence_note", ""), 1500)}
+{context}
+"""
+
+
+def normalize_explanation(data: dict[str, Any]) -> dict[str, Any]:
+    confidence = str(data.get("confidence") or "").strip().lower()
+    if confidence not in {"high", "medium", "low"}:
+        confidence = ""
+    return {
+        "relation": str(data.get("relation") or data.get("divergence_note") or "").strip(),
+        "confidence": confidence,
+    }
+
+
+def regenerate_explanation(entry_id: str, row: dict[str, Any], external_context: str) -> dict[str, Any]:
+    from correspondence_scanner import LocalLLMClient, parse_json_object
+
+    entries = load_entries()
+    entry = find_entry(entries, entry_id)
+    if entry is None:
+        raise ValueError("entry not found")
+
+    client = LocalLLMClient(DEFAULT_LLM_URL, timeout=300)
+    models = client.list_models()
+    if not models:
+        raise RuntimeError("No local LLM models were returned by /v1/models")
+    model = client.model or models[0]
+    content = client.chat_json(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You refine reviewer-facing correspondence explanations. "
+                    "Return only valid JSON and never regenerate matrix rows."
+                ),
+            },
+            {"role": "user", "content": explanation_prompt(entry, row, external_context)},
+        ],
+    )
+    try:
+        data = parse_json_object(content)
+    except json.JSONDecodeError:
+        data = parse_json_object(client.repair_json(model, content))
+    return normalize_explanation(data)
+
+
 def set_job(job_id: str, **updates: Any) -> None:
     with JOBS_LOCK:
         job = JOBS.setdefault(job_id, {})
@@ -265,10 +388,55 @@ def chunk_seed_rows(entry: dict[str, Any]) -> list[dict[str, Any]]:
     return rows[:MAX_ANALYSIS_CHUNKS]
 
 
+def line_range_from_ref(ref: str) -> tuple[int, int] | None:
+    match = re.search(r":(\d+)(?:-(\d+))?", ref or "")
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2) or match.group(1))
+    return min(start, end), max(start, end)
+
+
+def source_excerpt(path_text: str, ref: str, radius: int = 18) -> str:
+    line_range = line_range_from_ref(ref)
+    if line_range is None:
+        return ""
+    try:
+        lines = read_text(path_text).splitlines()
+    except Exception:
+        return ""
+    start_line, end_line = line_range
+    start = max(1, start_line - radius)
+    end = min(len(lines), end_line + radius)
+    rendered = []
+    for number in range(start, end + 1):
+        marker = ">>" if start_line <= number <= end_line else "  "
+        rendered.append(f"{marker} {number:>5}  {lines[number - 1]}")
+    return "\n".join(rendered)
+
+
+def chunk_code_context(entry: dict[str, Any], seed_row: dict[str, Any]) -> str:
+    blocks = []
+    cuda_ref = str(seed_row.get("cuda_ref") or "")
+    metal_ref = str(seed_row.get("metal_ref") or "")
+    if cuda_ref:
+        excerpt = source_excerpt(str(entry.get("cuda_path") or ""), cuda_ref)
+        if excerpt:
+            blocks.append(f"CUDA excerpt around current cuda_ref {cuda_ref}:\n{excerpt}")
+    if metal_ref:
+        excerpt = source_excerpt(str(entry.get("metal_path") or ""), metal_ref)
+        if excerpt:
+            blocks.append(f"Metal excerpt around current metal_ref {metal_ref}:\n{excerpt}")
+    return "\n\n".join(blocks)
+
+
 def chunk_prompt(entry: dict[str, Any], seed_row: dict[str, Any], chunk_index: int, total_chunks: int, web_context: str) -> str:
     context = ""
     if web_context.strip():
         context = f"\nOptional external context:\n{web_context.strip()}\n"
+    code_context = chunk_code_context(entry, seed_row)
+    if code_context:
+        code_context = f"\nCode excerpts for checking refs:\n{code_context}\n"
     return f"""You are refining one chunk of a CUDA/Metal correspondence matrix.
 
 Return only JSON with this shape:
@@ -277,9 +445,9 @@ Return only JSON with this shape:
     {{
       "kind": "exact | strong | mild | weak | partial | divergent | cuda_only | metal_only | no_match | risk | contract | artifact | lifecycle | dependency",
       "cuda": "CUDA-side code fact, method, block, or behavior. Leave blank if absent.",
-      "cuda_ref": "CUDA path with line or range. Leave blank if absent or uncertain.",
+      "cuda_ref": "CUDA path with line or range that contains the described CUDA behavior. Leave blank if absent, uncertain, or only blank/comment/decorator lines match.",
       "metal": "Metal-side code fact, method, block, or behavior. Leave blank if absent.",
-      "metal_ref": "Metal path with line or range. Leave blank if absent or uncertain.",
+      "metal_ref": "Metal path with line or range that contains the described Metal behavior. Leave blank if absent, uncertain, or only blank/comment/decorator lines match.",
       "relation": "Explain exact match, loose analogy, divergence, missing counterpart, or inspection risk.",
       "status": "pending",
       "confidence": "high | medium | low"
@@ -297,9 +465,16 @@ CUDA path: {entry.get("cuda_path", "")}
 Metal path: {entry.get("metal_path", "")}
 Existing seed row:
 {json.dumps(seed_row, indent=2)}
+{code_context}
 {context}
 Focus only on this seed row. You may split weak or divergent matches into
 adjacent one-sided rows. Do not regenerate the whole file matrix.
+References must point to the smallest non-empty code range that supports the
+row description. Do not cite nearby blank lines, import gaps, comments, or
+decorators unless the row is specifically about those lines.
+If the provided excerpt shows the current ref is empty or does not support the
+description, correct the ref to a better line range visible in the excerpt, or
+leave that ref blank when no supporting line range is visible.
 """
 
 
@@ -692,17 +867,13 @@ def app_html() -> str:
     .metric strong { display: block; font-size: 20px; }
     .metric span { color: var(--muted); font-size: 12px; }
     .workbench-head {
-      position: sticky;
-      top: 0;
-      z-index: 5;
       display: grid;
       gap: 12px;
-      background: color-mix(in srgb, var(--bg) 88%, transparent);
+      background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
       padding: 12px;
       margin-bottom: 14px;
-      backdrop-filter: blur(12px);
     }
     .workbench-title {
       display: grid;
@@ -770,6 +941,11 @@ def app_html() -> str:
       padding-top: 8px;
       white-space: pre-wrap;
     }
+    .draft-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
     .meta h2 { margin: 0 0 8px; font-size: 20px; }
     .paths {
       display: grid;
@@ -828,16 +1004,21 @@ def app_html() -> str:
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
-      overflow: hidden;
+      overflow: visible;
       margin-bottom: 14px;
     }
     .matrix-head {
+      position: sticky;
+      top: 0;
+      z-index: 6;
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 10px;
       padding: 10px 12px;
       border-bottom: 1px solid var(--line);
+      border-radius: 8px 8px 0 0;
+      background: var(--panel);
     }
     .matrix-head h3 { margin: 0; font-size: 14px; }
     .matrix-tools {
@@ -1027,6 +1208,31 @@ def app_html() -> str:
       color: var(--codeLine);
       white-space: normal;
     }
+    .ref-warning {
+      margin: 8px 10px;
+      padding: 7px 9px;
+      border: 1px solid var(--warn);
+      border-radius: 6px;
+      color: var(--warn);
+      background: color-mix(in srgb, var(--warn) 12%, transparent);
+      font-size: 12px;
+      white-space: normal;
+    }
+    .snippet-description {
+      margin: 8px 10px;
+      padding: 7px 9px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--text);
+      background: var(--panelSoft);
+      font-size: 12px;
+      line-height: 1.35;
+      white-space: normal;
+    }
+    .snippet-description strong {
+      color: var(--muted);
+      margin-right: 4px;
+    }
     .diff-cell textarea {
       border: 0;
       border-radius: 0;
@@ -1060,6 +1266,19 @@ def app_html() -> str:
       border-radius: 0;
       min-height: 68px;
       background: var(--relationBg);
+    }
+    .relationship-tools {
+      display: grid;
+      gap: 8px;
+      border-top: 1px solid var(--line);
+      padding: 8px;
+      background: color-mix(in srgb, var(--panel) 70%, transparent);
+    }
+    .relationship-tools input {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
     }
     .matrix-row textarea, .matrix-row input {
       width: 100%;
@@ -1462,25 +1681,48 @@ def app_html() -> str:
       )).join("");
     }
 
-    function renderNumberedSnippet(content, startLine, radius = 8) {
+    function refRange(ref) {
+      const match = String(ref || "").match(/:([0-9]+)(?:-([0-9]+))?/);
+      if (!match) return { start: 1, end: 1 };
+      const start = Number(match[1]);
+      const end = Number(match[2] || match[1]);
+      return { start: Math.min(start, end), end: Math.max(start, end) };
+    }
+
+    function rangeHasCode(content, range) {
       const lines = String(content || "").split("\\n");
-      const start = Math.max(1, startLine - radius);
-      const end = Math.min(lines.length, startLine + radius);
+      for (let number = range.start; number <= range.end; number += 1) {
+        const text = lines[number - 1] || "";
+        if (text.trim()) return true;
+      }
+      return false;
+    }
+
+    function renderRefWarning(content, range) {
+      return rangeHasCode(content, range)
+        ? ""
+        : `<div class="ref-warning">Reference points at empty lines. Clear it or choose a better code range.</div>`;
+    }
+
+    function renderNumberedSnippet(content, range, radius = 8) {
+      const lines = String(content || "").split("\\n");
+      const start = Math.max(1, range.start - radius);
+      const end = Math.min(lines.length, range.end + radius);
       const rendered = [];
       for (let number = start; number <= end; number += 1) {
-        const marker = number === startLine ? ">>" : "  ";
+        const marker = number >= range.start && number <= range.end ? ">>" : "  ";
         rendered.push(`${marker} ${String(number).padStart(5, " ")}  ${lines[number - 1] || ""}`);
       }
       return escapeHtml(rendered.join("\\n"));
     }
 
-    function renderInlineSnippet(content, startLine, radius = 8) {
+    function renderInlineSnippet(content, range, radius = 8) {
       const lines = String(content || "").split("\\n");
-      const start = Math.max(1, startLine - radius);
-      const end = Math.min(lines.length, startLine + radius);
+      const start = Math.max(1, range.start - radius);
+      const end = Math.min(lines.length, range.end + radius);
       const rows = [];
       for (let number = start; number <= end; number += 1) {
-        const isHit = number === startLine;
+        const isHit = number >= range.start && number <= range.end;
         rows.push(`
           <div class="snippet-gutter ${isHit ? "snippet-row-hit" : ""}">
             <span class="snippet-marker ${isHit ? "hit" : ""}">${isHit ? "&gt;&gt;" : ""}</span>
@@ -1490,11 +1732,6 @@ def app_html() -> str:
         `);
       }
       return `<div class="snippet-scroll"><div class="snippet-code">${rows.join("")}</div></div>`;
-    }
-
-    function lineFromRef(ref) {
-      const match = String(ref || "").match(/:([0-9]+)/);
-      return match ? Number(match[1]) : 1;
     }
 
     function platformFromRef(ref) {
@@ -1595,9 +1832,6 @@ def app_html() -> str:
       }
       const payload = await api(`/api/entry?id=${encodeURIComponent(selectedId)}`);
       currentPayload = payload;
-      const similarities = payload.similarities || [];
-      const differences = payload.differences || [];
-      const risks = payload.inspection_risks || [];
       detail.innerHTML = `
         <div class="metrics" id="metrics"></div>
         <section class="workbench-head">
@@ -1659,23 +1893,6 @@ def app_html() -> str:
           <div id="snippetPanel"></div>
           ${renderMatrix(payload.comparison_rows || [])}
         </div>
-        <div class="analysis">
-          <section class="inspector">
-            <h3>LLM Inspection Notes</h3>
-            ${renderFindingList("Similarities", similarities)}
-            ${renderFindingList("Differences", differences)}
-            ${renderFindingList("Review risks", risks)}
-          </section>
-          <section class="inspector">
-            <h3>Optional Web Context</h3>
-            <div class="webbox">
-              <input id="webQuery" value="${escapeHtml(defaultWebQuery(payload))}">
-              <button id="webSearch">Fetch Web Context</button>
-              <textarea id="webContext" placeholder="External snippets or notes to include in the LLM prompt"></textarea>
-              <div class="web-results" id="webResults">No web context loaded.</div>
-            </div>
-          </section>
-        </div>
         <div class="summaries">
           ${renderSummary("CUDA Summary", payload.summary.cuda)}
           ${renderSummary("Metal Summary", payload.summary.metal)}
@@ -1703,7 +1920,6 @@ def app_html() -> str:
       document.getElementById("reject").addEventListener("click", () => updateEntry("rejected"));
       document.getElementById("addRow").addEventListener("click", addMatrixRow);
       document.getElementById("analyze").addEventListener("click", analyzeEntry);
-      document.getElementById("webSearch").addEventListener("click", fetchWebContext);
       attachMatrixControls();
       attachRowButtons();
       detail.querySelectorAll(".ref-chip").forEach((button) => {
@@ -1785,6 +2001,15 @@ def app_html() -> str:
           <details class="relationship-detail">
             <summary>Relationship note</summary>
             <textarea class="row-relation">${escapeHtml(row.relation || "")}</textarea>
+            <div class="relationship-tools">
+              <input class="row-context-query" value="${escapeHtml(defaultRowContextQuery(row))}" placeholder="Optional context query">
+              <div class="draft-actions">
+                <button type="button" class="row-context-fetch">Fetch Context</button>
+                <button type="button" class="ai row-relation-regenerate">Regenerate</button>
+              </div>
+              <textarea class="row-context" placeholder="Reviewer guidance, edit request, pasted notes, or optional web snippets for this relationship note"></textarea>
+              <div class="web-results row-context-results">No context loaded.</div>
+            </div>
           </details>
         </article>
       `;
@@ -1971,6 +2196,12 @@ def app_html() -> str:
       document.querySelectorAll(".remove-row").forEach((button) => {
         button.onclick = () => button.closest(".matrix-row").remove();
       });
+      document.querySelectorAll(".row-context-fetch").forEach((button) => {
+        button.onclick = () => fetchRowContext(button.closest(".matrix-row"));
+      });
+      document.querySelectorAll(".row-relation-regenerate").forEach((button) => {
+        button.onclick = () => regenerateRelationshipNote(button.closest(".matrix-row"));
+      });
     }
 
     function addMatrixRow() {
@@ -1987,9 +2218,16 @@ def app_html() -> str:
     function jumpToRef(ref, sourceButton = null) {
       if (!ref || ref === "No reference") return;
       const platform = platformFromRef(ref);
-      const line = lineFromRef(ref);
+      const range = refRange(ref);
       const content = platform === "metal" ? currentPayload?.metal_content : currentPayload?.cuda_content;
       const diffCell = sourceButton?.closest(".diff-cell");
+      const rowElement = sourceButton?.closest(".matrix-row");
+      const describedBehavior = platform === "metal"
+        ? rowElement?.querySelector(".row-metal")?.value
+        : rowElement?.querySelector(".row-cuda")?.value;
+      const descriptionBlock = describedBehavior
+        ? `<div class="snippet-description"><strong>Row description:</strong>${escapeHtml(describedBehavior)}</div>`
+        : "";
       const inlinePanel = diffCell?.querySelector(".inline-snippet");
       if (inlinePanel) {
         const isOpen = inlinePanel.classList.contains("open") && inlinePanel.dataset.ref === ref;
@@ -2003,7 +2241,9 @@ def app_html() -> str:
         inlinePanel.classList.add("open");
         inlinePanel.innerHTML = `
           <div class="path">${escapeHtml(ref)}</div>
-          ${renderInlineSnippet(content, line)}
+          ${descriptionBlock}
+          ${renderRefWarning(content, range)}
+          ${renderInlineSnippet(content, range)}
         `;
         inlinePanel.scrollIntoView({ block: "nearest" });
         return;
@@ -2014,21 +2254,36 @@ def app_html() -> str:
         <section class="snippet-panel">
           <h3>${platform === "metal" ? "Metal" : "CUDA"} Code Excerpt</h3>
           <div class="path">${escapeHtml(ref)}</div>
-          <pre>${renderNumberedSnippet(content, line)}</pre>
+          ${descriptionBlock}
+          ${renderRefWarning(content, range)}
+          <pre>${renderNumberedSnippet(content, range)}</pre>
         </section>
       `;
       panel.scrollIntoView({ block: "nearest" });
     }
 
-    function renderFindingList(title, values) {
-      if (!values.length) {
-        return `<h3>${title}</h3><p class="path">No LLM notes yet.</p>`;
-      }
-      return `<h3>${title}</h3><ul>${values.map((value) => `<li>${escapeHtml(value)}</li>`).join("")}</ul>`;
+    function defaultRowContextQuery(row) {
+      return [
+        currentPayload?.logical_component || "",
+        row.kind || "",
+        row.cuda_ref || row.cuda || "",
+        row.metal_ref || row.metal || "",
+        "vLLM Hook CUDA Metal parity",
+      ].filter(Boolean).join(" ");
     }
 
-    function defaultWebQuery(payload) {
-      return `${payload.logical_component} vLLM Metal MLX CUDA hooks artifact parity`;
+    function collectRow(rowElement) {
+      return {
+        kind: rowElement.querySelector(".row-kind").value.trim(),
+        cuda_ref: rowElement.querySelector(".row-cuda-ref").value.trim(),
+        cuda: rowElement.querySelector(".row-cuda").value.trim(),
+        metal_ref: rowElement.querySelector(".row-metal-ref").value.trim(),
+        metal: rowElement.querySelector(".row-metal").value.trim(),
+        relation: rowElement.querySelector(".row-relation").value.trim(),
+        generated_at: rowElement.querySelector(".row-generated-at")?.value.trim() || "",
+        status: rowElement.querySelector(".row-status").value,
+        confidence: document.getElementById("confidence").value,
+      };
     }
 
     async function updateEntry(status) {
@@ -2058,7 +2313,7 @@ def app_html() -> str:
       if (status) status.textContent = "Queued candidate generation...";
       if (rowsAdded) rowsAdded.textContent = "";
       try {
-        const webContext = document.getElementById("webContext").value;
+        const webContext = document.getElementById("webContext")?.value || "";
         const payload = await api("/api/analyze", {
           method: "POST",
           body: JSON.stringify({ id: selectedId, web_context: webContext }),
@@ -2116,21 +2371,54 @@ def app_html() -> str:
       }
     }
 
-    async function fetchWebContext() {
-      const results = document.getElementById("webResults");
-      const context = document.getElementById("webContext");
-      const query = document.getElementById("webQuery").value;
+    async function fetchRowContext(rowElement) {
+      const results = rowElement.querySelector(".row-context-results");
+      const context = rowElement.querySelector(".row-context");
+      const query = rowElement.querySelector(".row-context-query").value;
       results.textContent = "Searching...";
       try {
-        const payload = await api("/api/web", {
+        const payload = await api("/api/context", {
           method: "POST",
-          body: JSON.stringify({ query }),
+          body: JSON.stringify({ id: selectedId, query, row: collectRow(rowElement) }),
         });
         const text = payload.context || "No results found.";
-        results.textContent = text;
+        results.textContent = payload.message || text;
         context.value = text;
       } catch (error) {
         results.textContent = error.message;
+      }
+    }
+
+    async function regenerateRelationshipNote(rowElement) {
+      const button = rowElement.querySelector(".row-relation-regenerate");
+      const results = rowElement.querySelector(".row-context-results");
+      const relation = rowElement.querySelector(".row-relation");
+      button.disabled = true;
+      button.textContent = "Regenerating...";
+      results.textContent = "Regenerating this relationship note...";
+      try {
+        const payload = await api("/api/explanation", {
+          method: "POST",
+          body: JSON.stringify({
+            id: selectedId,
+            row: collectRow(rowElement),
+            web_context: rowElement.querySelector(".row-context").value,
+          }),
+        });
+        if (payload.explanation.relation) {
+          const changed = payload.explanation.relation !== relation.value;
+          relation.value = payload.explanation.relation;
+          results.textContent = changed
+            ? "Relationship note regenerated. Save to persist it."
+            : "Regeneration returned the same relationship note.";
+        } else {
+          results.textContent = "Regeneration returned no relationship note.";
+        }
+      } catch (error) {
+        results.textContent = error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = "Regenerate";
       }
     }
 
@@ -2264,9 +2552,56 @@ class ReviewHandler(BaseHTTPRequestHandler):
             try:
                 results = fetch_web_context(query)
             except Exception as exc:
-                self.send_json({"error": f"Web context fetch failed: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                self.send_json(empty_web_context(query, exc))
                 return
             self.send_json({"ok": True, "results": results, "context": web_results_to_context(results)})
+            return
+        if parsed.path == "/api/context":
+            data = self.read_json()
+            entries = load_entries()
+            entry_id = str(data.get("id") or "")
+            entry = find_entry(entries, entry_id)
+            if entry is None:
+                self.send_json({"error": "entry not found"}, HTTPStatus.NOT_FOUND)
+                return
+            row = data.get("row") if isinstance(data.get("row"), dict) else {}
+            query = str(data.get("query") or "").strip() or (
+                row_context_query(entry, row) if row else candidate_context_query(entry)
+            )
+            try:
+                results = fetch_web_context(query)
+            except Exception as exc:
+                self.send_json(empty_web_context(query, exc))
+                return
+            self.send_json(
+                {
+                    "ok": True,
+                    "query": query,
+                    "provider": "duckduckgo_html",
+                    "results": results,
+                    "context": web_results_to_context(results),
+                }
+            )
+            return
+        if parsed.path == "/api/explanation":
+            data = self.read_json()
+            entry_id = str(data.get("id") or "")
+            if not entry_id:
+                self.send_json({"error": "id is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            row = data.get("row")
+            if not isinstance(row, dict):
+                self.send_json({"error": "row is required"}, HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                explanation = regenerate_explanation(entry_id, row, str(data.get("web_context") or ""))
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, HTTPStatus.NOT_FOUND)
+                return
+            except Exception as exc:
+                self.send_json({"error": f"Explanation regeneration failed: {exc}"}, HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self.send_json({"ok": True, "explanation": explanation})
             return
         if parsed.path == "/api/registry":
             entries = load_entries()
