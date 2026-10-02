@@ -43,6 +43,11 @@ DEFAULT_BANNED_CONTRACTIONS = (
 )
 
 
+def default_eprime_bad_words() -> list[str]:
+    """Return E-Prime surface forms for vLLM's native bad_words processor."""
+    return list(DEFAULT_BANNED_FORMS) + list(DEFAULT_BANNED_CONTRACTIONS)
+
+
 def _compile_violation_pattern(
     banned_forms: Iterable[str],
     banned_contractions: Iterable[str],
