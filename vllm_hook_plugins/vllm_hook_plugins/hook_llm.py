@@ -112,6 +112,9 @@ class HookLLM:
             extra["hookq_mode"] = self._hookq_mode
         elif self.worker_name == "steer_hook_act":
             extra["steer"] = self._steering_config
+        elif self.worker_name == "probe_gcad":
+            if self._steering_config:
+                extra["gcad"] = self._steering_config
         if save_to_disk:
             extra["save_to_disk"] = True
             extra["run_id"] = run_id

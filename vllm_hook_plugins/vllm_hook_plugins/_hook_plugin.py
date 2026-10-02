@@ -34,6 +34,7 @@ _original_chat_full_generator: Callable | None = None
 _WORKER_EXT_HS = "vllm_hook_plugins.workers.probe_hidden_states_worker.ProbeHiddenStatesWorker"
 _WORKER_EXT_QK = "vllm_hook_plugins.workers.probe_hookqk_worker.ProbeHookQKWorker"
 _WORKER_EXT_STEER = "vllm_hook_plugins.workers.steer_activation_worker.SteerHookActWorker"
+_WORKER_EXT_GCAD = "vllm_hook_plugins.workers.gcad_worker.GCADWorker"
 
 # Default hook_dir for save_to_disk requests when extra_args["hook_dir"] is not
 # set. /dev/shm/vllm_hook is a RAM tmpfs on Linux — fast and ephemeral, matching
@@ -83,6 +84,8 @@ def _patched_create_engine_config(self, *args, **kwargs):
             self.worker_extension_cls = _WORKER_EXT_QK
         elif worker_type == "steer":
             self.worker_extension_cls = _WORKER_EXT_STEER
+        elif worker_type == "gcad":
+            self.worker_extension_cls = _WORKER_EXT_GCAD
         else:
             self.worker_extension_cls = _WORKER_EXT_HS
     self.enforce_eager = True
@@ -118,7 +121,7 @@ async def _patched_generate(
     # vllm_xargs only allows scalar values, so HookClient JSON-encodes nested
     # structures. Decode them back here before the worker reads extra_args.
     import json as _json
-    for _k in ("output_qk", "output_hidden_states", "steer"):
+    for _k in ("output_qk", "output_hidden_states", "steer", "gcad"):
         if isinstance(extra.get(_k), str):
             try:
                 _decoded = _json.loads(extra[_k])
@@ -134,7 +137,9 @@ async def _patched_generate(
     wants_hs = extra.get("output_hidden_states") is not None
     wants_qk = extra.get("output_qk") is not None
     wants_steer = isinstance(extra.get("steer"), dict)
-    needs_hooks = wants_hs or wants_qk or wants_steer
+    wants_gcad = isinstance(extra.get("gcad"), dict)
+    wants_artifacts = wants_hs or wants_qk
+    needs_hooks = wants_hs or wants_qk or wants_steer or wants_gcad
     save_to_disk = bool(extra.get("save_to_disk"))
 
     if needs_hooks and not getattr(self, "_vllm_hook_installed", False):
@@ -146,7 +151,7 @@ async def _patched_generate(
         async for output in _original_generate(
             self, prompt, sampling_params, request_id, **kwargs
         ):
-            if output.finished and needs_hooks and not wants_steer:
+            if output.finished and wants_artifacts:
                 if save_to_disk:
                     run_id = extra.get("run_id") or request_id
                     hook_dir = extra.get("hook_dir") or _DEFAULT_HOOK_DIR
@@ -165,7 +170,7 @@ async def _patched_generate(
                         output.probes = probes
             yield output
     finally:
-        if needs_hooks and not wants_steer and not save_to_disk:
+        if wants_artifacts and not save_to_disk:
             await self.collective_rpc("clear_captured_states", args=(request_id,))
 
 
@@ -192,6 +197,7 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
         (sp.extra_args or {}).get("output_hidden_states") is not None
         or (sp.extra_args or {}).get("output_qk") is not None
         or bool((sp.extra_args or {}).get("steer"))
+        or bool((sp.extra_args or {}).get("gcad"))
         for sp in params_list
     )
 
