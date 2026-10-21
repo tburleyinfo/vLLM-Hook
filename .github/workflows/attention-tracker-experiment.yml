@@ -1,0 +1,191 @@
+name: MLR15 MLR40 Attention Tracker Experiment
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/attention-tracker-experiment.yml
+      - experiments/attention_tracker/**
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: prepare, baseline, discover, probe, live-probe, retrieve, freeze, source-compatibility, translate, evaluate, summary, finish
+        required: true
+        default: prepare
+      condition:
+        description: Candidate to translate (both is research only)
+        type: choice
+        options: [no-graph, graph, both]
+        default: no-graph
+      run_tests:
+        description: Run Metal parity validation during finish
+        type: boolean
+        default: true
+      create_draft_pr:
+        description: Open a draft for one candidate after finish
+        type: boolean
+        default: true
+      pr_base:
+        description: Destination branch for the draft
+        default: main
+      manifest:
+        description: Frozen experiment configuration for prepare
+        required: true
+        default: experiments/attention_tracker/manifest.json
+      run_dir:
+        description: Persistent artifact directory; prepare requires a new directory
+        required: true
+        default: experiment-runs/attention-tracker/local
+      pilot:
+        description: Permit draft graph translation as pilot evidence only
+        required: true
+        default: 'false'
+      baseline_run:
+        description: Optional prior passing CPU run; source, evaluator and settings must match
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check experiment protocol and isolated PR publication
+        run: python -m unittest discover -s experiments/attention_tracker -p 'test_*.py'
+      - name: Check local launcher syntax
+        run: bash -n experiments/attention_tracker/act.sh
+
+  experiment:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    # A native Apple Silicon host is required for actual Metal evaluation.
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 40
+    outputs:
+      bundle_ready: ${{ steps.bundle.outputs.ready }}
+    steps:
+      - name: Checkout experiment harness
+        if: ${{ !env.ACT }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: false
+      - name: Run frozen experiment stage
+        id: experiment
+        continue-on-error: true
+        shell: bash
+        env:
+          EXPERIMENT_CONDITION: ${{ inputs.condition }}
+          RUN_TESTS: ${{ inputs.run_tests }}
+          CREATE_DRAFT: ${{ inputs.create_draft_pr }}
+          EXPERIMENT_MANIFEST: ${{ inputs.manifest }}
+          EXPERIMENT_STAGE: ${{ inputs.stage }}
+          EXPERIMENT_RUN_DIR: ${{ inputs.run_dir }}
+          EXPERIMENT_PILOT: ${{ inputs.pilot }}
+          EXPERIMENT_BASELINE_RUN: ${{ inputs.baseline_run }}
+          ATTN_CPU_PYTHON: ${{ vars.ATTN_CPU_PYTHON }}
+          ATTN_METAL_PYTHON: ${{ vars.ATTN_METAL_PYTHON }}
+          ATTN_METAL_SITE: ${{ vars.ATTN_METAL_SITE }}
+          ATTN_LOCAL_REPO: ${{ vars.ATTN_LOCAL_REPO }}
+          HF_HUB_CACHE: ${{ vars.ATTN_MODEL_CACHE }}
+          ATTN_COPILOT_BIN: ${{ vars.ATTN_COPILOT_BIN }}
+          ATTN_COPILOT_HOME: ${{ vars.ATTN_COPILOT_HOME }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "${ACT:-}" == "true" ]]; then
+            cd "$ATTN_LOCAL_REPO"
+          fi
+          if [[ "${ACT:-}" != "true" && "$EXPERIMENT_STAGE" == "prepare" ]]; then
+            source_revision="$(python3 -c 'import json; print(json.load(open(__import__("os").environ["EXPERIMENT_MANIFEST"]))["source_revision"])')"
+            [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]]
+            if ! git cat-file -e "$source_revision^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "$source_revision"
+            fi
+          fi
+          args=(--stage "$EXPERIMENT_STAGE" --run-dir "$EXPERIMENT_RUN_DIR" --manifest "$EXPERIMENT_MANIFEST")
+          if [[ -n "${ATTN_METAL_SITE:-}" ]]; then
+            args+=(--target-site "$ATTN_METAL_SITE")
+          fi
+          if [[ "$EXPERIMENT_PILOT" == "true" ]]; then
+            args+=(--pilot)
+          fi
+          if [[ -n "${EXPERIMENT_BASELINE_RUN:-}" ]]; then
+            args+=(--baseline-run "$EXPERIMENT_BASELINE_RUN")
+          fi
+          args+=(--condition "$EXPERIMENT_CONDITION")
+          if [[ "$EXPERIMENT_STAGE" == "finish" ]]; then
+            if [[ "$RUN_TESTS" == "false" ]]; then args+=(--skip-tests); fi
+            if [[ "$CREATE_DRAFT" == "true" ]]; then
+              [[ "$EXPERIMENT_CONDITION" != "both" ]] || { echo 'Choose graph or no-graph for a draft PR'; exit 1; }
+              rm -rf -- "$RUNNER_TEMP/attention-tracker-pr"
+              args+=(--prepare-pr "$RUNNER_TEMP/attention-tracker-pr")
+            fi
+          fi
+          python3 experiments/attention_tracker/run.py "${args[@]}"
+      - name: Check publication bundle
+        id: bundle
+        if: ${{ always() && inputs.stage == 'finish' && inputs.create_draft_pr && !env.ACT }}
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/attention-tracker-pr/metadata.json" ]]; then
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload selected candidate
+        if: ${{ always() && steps.bundle.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: attention-tracker-pr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/attention-tracker-pr/
+          if-no-files-found: error
+      - name: Upload experiment evidence
+        if: ${{ always() && !env.ACT }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: attention-tracker-experiment
+          path: |
+            ${{ inputs.run_dir }}/**/*.json
+            ${{ inputs.run_dir }}/**/*.md
+            ${{ inputs.run_dir }}/**/*.log
+            ${{ inputs.run_dir }}/**/*.patch
+            ${{ inputs.run_dir }}/shared-context/**
+            ${{ inputs.run_dir }}/platform-discovery/**
+            ${{ inputs.run_dir }}/live-platform/**
+            ${{ inputs.run_dir }}/source_dag.mmd
+            ${{ inputs.run_dir }}/source_only/candidate/attention_tracker_metal.py
+            ${{ inputs.run_dir }}/source_validated_dag/candidate/attention_tracker_metal.py
+            ${{ inputs.run_dir }}/source_only/candidate/notebooks/metal/demo_attntracker_metal.ipynb
+            ${{ inputs.run_dir }}/source_validated_dag/candidate/notebooks/metal/demo_attntracker_metal.ipynb
+          if-no-files-found: warn
+
+      - name: Preserve experiment failure
+        if: ${{ always() && steps.experiment.outcome == 'failure' }}
+        run: exit 1
+
+  publish:
+    needs: experiment
+    if: ${{ always() && inputs.stage == 'finish' && inputs.create_draft_pr && inputs.condition != 'both' && needs.experiment.outputs.bundle_ready == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: attention-tracker-pr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/attention-tracker-pr
+      - name: Open selected candidate as a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BASE: ${{ inputs.pr_base }}
+        run: |
+          python3 experiments/attention_tracker/publish_candidate.py \
+            --bundle "$RUNNER_TEMP/attention-tracker-pr" \
+            --repo "$GITHUB_REPOSITORY" --base "$PR_BASE"
