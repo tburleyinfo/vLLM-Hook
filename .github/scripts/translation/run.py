@@ -20,7 +20,8 @@ import repository_graph
 import publish_candidate
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+REPO = HERE.parents[2]
+PROFILE = REPO / ".github/translation/attention_tracker"
 CONDITIONS = ("source_only", "source_validated_dag")
 
 
@@ -100,10 +101,10 @@ def prepare(run, manifest_path, target_site=None):
     if "MiaLLM" not in (source / "examples/demo_attntracker.py").read_text():
         raise ValueError("Pinned source is obsolete: current MIA example required")
     shutil.copyfile(manifest_path, run / "manifest.json")
-    shutil.copyfile(HERE / "fixture.py", run / "fixture.py")
-    graph = (HERE / "source_dag.mmd").read_bytes()
-    shutil.copyfile(HERE / "source_dag.mmd", run / "source_dag.mmd")
-    shutil.copyfile(HERE / "dependencies.md", run / "dependencies.md")
+    shutil.copyfile(PROFILE / "fixture.py", run / "fixture.py")
+    graph = (PROFILE / "source_dag.mmd").read_bytes()
+    shutil.copyfile(PROFILE / "source_dag.mmd", run / "source_dag.mmd")
+    shutil.copyfile(PROFILE / "dependencies.md", run / "dependencies.md")
     file_hashes = {str(p.relative_to(source)): digest(p.read_bytes()) for p in sorted(source.rglob("*")) if p.is_file()}
     source_evidence = {"revision": revision, "archive_sha256": archive_hash, "files": file_hashes}
     write_json(run / "source-evidence.json", source_evidence)
@@ -385,7 +386,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--stage", choices=["prepare", "baseline", "metal-preflight", "source-compatibility", "discover", "probe", "live-probe", "retrieve", "freeze", "translate", "evaluate", "summary", "finish"], required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
-    parser.add_argument("--manifest", type=Path, default=HERE / "manifest.json")
+    parser.add_argument("--manifest", type=Path, default=PROFILE / "manifest.retrieval.json")
     parser.add_argument("--target-site")
     parser.add_argument("--cpu-python", default=os.environ.get("ATTN_CPU_PYTHON", ""))
     parser.add_argument("--baseline-run", type=Path)

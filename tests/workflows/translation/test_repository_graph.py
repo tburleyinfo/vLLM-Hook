@@ -4,6 +4,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / ".github/scripts/translation"))
+
 import repository_graph as graph
 
 
@@ -57,7 +60,7 @@ class PairedContextTests(unittest.TestCase):
         import run as runner
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            manifest = json.loads((runner.HERE / 'manifest.json').read_text())
+            manifest = json.loads((runner.PROFILE / 'manifest.json').read_text())
             manifest.update(protocol_version=5, retrieval={'query': 'attention'})
             manifest_path = root / 'manifest.json'
             manifest_path.write_text(json.dumps(manifest))

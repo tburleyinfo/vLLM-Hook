@@ -1,7 +1,21 @@
-# Attention Tracker translation workflow
+# Repository translation workflow
 
-Translate one Attention Tracker candidate to Metal, optionally validate it, and
-open a draft PR containing only that candidate's changes.
+This workflow builds a translation candidate, optionally validates it, and opens
+a draft PR containing only the selected candidate's changes. The first supported
+case is Attention Tracker on Metal; graph/no-graph selects how that translation
+receives library context. This does not yet translate every repository feature.
+
+## Published layout
+
+- `.github/workflows/repository-translation.yml`: GitHub Actions entry point.
+- `.github/scripts/translation/`: scripts used by the workflow.
+- `.github/translation/attention_tracker/`: case configuration, validation fixture
+  and source context.
+- `tests/workflows/translation/`: tests of the published workflow scripts.
+
+PR checks import the scripts from these published paths. They do not depend on
+`experiments/`, local launchers, or saved research runs. Real Metal validation
+executes the selected translated candidate before its patch is published.
 
 ## Setup
 
@@ -26,10 +40,9 @@ approve pull requests**. Organization policy can restrict this setting.
 
 ## Prepare a run
 
-After merging the workflow, open **Actions → MLR15 MLR40 Attention Tracker
-Experiment → Run workflow**.
+After merging the workflow, open **Actions → Repository Translation → Run workflow**.
 
-Use `manifest: experiments/attention_tracker/manifest.retrieval.json` for the
+Use `manifest: .github/translation/attention_tracker/manifest.retrieval.json` for the
 current graph/no-graph comparison. Set `pilot: true`: this manifest uses Auto
 model routing, so results are pilot evidence. The older `manifest.json` is retained
 for the legacy source-graph protocol and its tests.
@@ -80,7 +93,7 @@ No graph advantage is established by a single paired pilot.
 Pull requests run the protocol tests on Ubuntu without model or GPU dependencies:
 
 ```bash
-python3 -m unittest discover -s experiments/attention_tracker -p 'test_*.py'
+python3 -m unittest discover -s tests/workflows/translation -p 'test_*.py'
 ```
 
 Real CPU/Metal validation requires the environments and prepared evidence above.

@@ -3,6 +3,9 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / ".github/scripts/translation"))
+
 from request_identity import capture_request_mapping, internal_id
 from capture_metadata import capture_config
 

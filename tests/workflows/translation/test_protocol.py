@@ -5,7 +5,10 @@ from pathlib import Path
 import tempfile
 import unittest
 
-spec = importlib.util.spec_from_file_location("experiment_runner", Path(__file__).with_name("run.py"))
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / ".github/scripts/translation"))
+
+spec = importlib.util.spec_from_file_location("experiment_runner", Path(__file__).resolve().parents[3] / ".github/scripts/translation/run.py")
 runner = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(runner)
 
@@ -42,14 +45,14 @@ class ProtocolTests(unittest.TestCase):
     def test_prompt_conditions_differ_only_by_graph(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp) / "run"
-            runner.prepare(run, runner.HERE / "manifest.json")
+            runner.prepare(run, runner.PROFILE / "manifest.json")
             baseline = (run / "source_only/prompt.md").read_text()
             graph_prompt = (run / "source_validated_dag/prompt.md").read_text()
             self.assertTrue(graph_prompt.startswith(baseline))
             self.assertNotIn("flowchart TD", baseline)
             self.assertIn("flowchart TD", graph_prompt)
             # Local uncommitted edits must not enter source/candidate snapshots.
-            self.assertFalse((run / "source/experiments/attention_tracker/run.py").exists())
+            self.assertFalse((run / "source/.github/scripts/translation/run.py").exists())
             runner.write_json(run / "cpu-result.json", {"status": "pass"})
             protocol = __import__("json").loads((run / "protocol.json").read_text())
             protocol["protocol_version"] = 1  # Legacy evidence gates remain supported.
@@ -68,7 +71,7 @@ class ProtocolTests(unittest.TestCase):
     def test_shared_evidence_gates_and_holdout(self):
         with tempfile.TemporaryDirectory() as tmp:
             run, site = Path(tmp) / "run", Path(tmp) / "site"
-            runner.prepare(run, runner.HERE / "manifest.json")
+            runner.prepare(run, runner.PROFILE / "manifest.json")
             selected = site / "mlx_lm/models/qwen2.py"
             selected.parent.mkdir(parents=True)
             selected.write_text("q_proj = None\nrope = None\n")
@@ -102,7 +105,7 @@ class ProtocolTests(unittest.TestCase):
     def test_version_three_requires_live_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             run, site = Path(tmp) / "run", Path(tmp) / "site"
-            runner.prepare(run, runner.HERE / "manifest.json")
+            runner.prepare(run, runner.PROFILE / "manifest.json")
             manifest = __import__("json").loads((run / "manifest.json").read_text())
             manifest["protocol_version"] = 3
             runner.write_json(run / "manifest.json", manifest)

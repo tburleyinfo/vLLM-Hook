@@ -1,10 +1,12 @@
-name: MLR15 MLR40 Attention Tracker Experiment
+name: Repository Translation
 
 on:
   pull_request:
     paths:
-      - .github/workflows/attention-tracker-experiment.yml
-      - experiments/attention_tracker/**
+      - .github/workflows/repository-translation.yml
+      - .github/scripts/translation/**
+      - .github/translation/**
+      - tests/workflows/translation/**
   workflow_dispatch:
     inputs:
       stage:
@@ -30,15 +32,15 @@ on:
       manifest:
         description: Frozen experiment configuration for prepare
         required: true
-        default: experiments/attention_tracker/manifest.json
+        default: .github/translation/attention_tracker/manifest.retrieval.json
       run_dir:
         description: Persistent artifact directory; prepare requires a new directory
         required: true
         default: experiment-runs/attention-tracker/local
       pilot:
-        description: Permit draft graph translation as pilot evidence only
+        description: Label Auto model routing as pilot evidence
         required: true
-        default: 'false'
+        default: 'true'
       baseline_run:
         description: Optional prior passing CPU run; source, evaluator and settings must match
         required: false
@@ -58,7 +60,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Check experiment protocol and isolated PR publication
-        run: python -m unittest discover -s experiments/attention_tracker -p 'test_*.py'
+        run: python -m unittest discover -s tests/workflows/translation -p 'test_*.py'
 
   experiment:
     if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -126,7 +128,7 @@ jobs:
               args+=(--prepare-pr "$RUNNER_TEMP/attention-tracker-pr")
             fi
           fi
-          python3 experiments/attention_tracker/run.py "${args[@]}"
+          python3 .github/scripts/translation/run.py "${args[@]}"
       - name: Check publication bundle
         id: bundle
         if: ${{ always() && inputs.stage == 'finish' && inputs.create_draft_pr && !env.ACT }}
@@ -184,6 +186,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           PR_BASE: ${{ inputs.pr_base }}
         run: |
-          python3 experiments/attention_tracker/publish_candidate.py \
+          python3 .github/scripts/translation/publish_candidate.py \
             --bundle "$RUNNER_TEMP/attention-tracker-pr" \
             --repo "$GITHUB_REPOSITORY" --base "$PR_BASE"

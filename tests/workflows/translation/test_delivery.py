@@ -7,6 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / ".github/scripts/translation"))
+
 import publish_candidate as delivery
 
 
