@@ -13,3 +13,6 @@ hs_aperture_dump/
 qk_aperture_dump/
 
 ignore/
+
+# GPU test environments, wheels and results
+.gpu-ci/
