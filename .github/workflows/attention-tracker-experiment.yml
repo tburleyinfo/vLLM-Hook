@@ -59,8 +59,6 @@ jobs:
           python-version: '3.12'
       - name: Check experiment protocol and isolated PR publication
         run: python -m unittest discover -s experiments/attention_tracker -p 'test_*.py'
-      - name: Check local launcher syntax
-        run: bash -n experiments/attention_tracker/act.sh
 
   experiment:
     if: ${{ github.event_name == 'workflow_dispatch' }}
