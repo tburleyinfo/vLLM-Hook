@@ -43,15 +43,15 @@ class DeliveryTests(unittest.TestCase):
             git('init', '-q')
             git('config', 'user.name', 'Test')
             git('config', 'user.email', 'test@example.com')
-            (repo / 'README.md').write_text('original\n')
+            (repo / 'application.py').write_text('original\n')
             git('add', '.')
             git('commit', '-qm', 'base')
             base = git('rev-parse', 'HEAD')
             git('remote', 'add', 'origin', 'https://github.com/example/project.git')
-            (repo / 'README.md').write_text('candidate\n')
+            (repo / 'application.py').write_text('candidate\n')
             saved = subprocess.check_output(['git', 'diff', '--binary'], cwd=repo)
             # Unrelated staged and unstaged work must survive publication.
-            (repo / 'README.md').write_text('user local work\n')
+            (repo / 'application.py').write_text('user local work\n')
             (repo / 'other.txt').write_text('unrelated\n')
             git('add', 'other.txt')
             before = git('status', '--porcelain')
@@ -79,13 +79,14 @@ class DeliveryTests(unittest.TestCase):
                 delivery.publish(bundle, 'example/project', 'main', repo)
             self.assertEqual(git('status', '--porcelain'), before)
             self.assertEqual((repo / '.git/index').read_bytes(), index)
-            self.assertEqual(git('diff-tree', '--no-commit-id', '--name-only', '-r', pushed[0]), 'README.md')
-            self.assertEqual(git('show', pushed[0] + ':README.md'), 'candidate')
+            self.assertEqual(git('diff-tree', '--no-commit-id', '--name-only', '-r', pushed[0]), 'application.py')
+            self.assertEqual(git('show', pushed[0] + ':application.py'), 'candidate')
             self.assertEqual(git('rev-parse', pushed[0] + '^'), base)
             # A forbidden file is rejected before any push.
-            (repo / 'forbidden.py').write_text('bad\n')
-            git('add', '-N', 'forbidden.py')
-            bad = subprocess.check_output(['git', 'diff', '--binary', '--', 'forbidden.py'], cwd=repo)
+            (repo / '.github/workflows').mkdir(parents=True)
+            (repo / '.github/workflows/candidate.yml').write_text('bad\n')
+            git('add', '-N', '.github/workflows/candidate.yml')
+            bad = subprocess.check_output(['git', 'diff', '--binary', '--', '.github/workflows/candidate.yml'], cwd=repo)
             (bundle / 'candidate.patch').write_bytes(bad)
             (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'patch_sha256': hashlib.sha256(bad).hexdigest()}))
             pushed.clear()
@@ -123,6 +124,19 @@ class FinishTests(unittest.TestCase):
                         evaluate.assert_called_once()
                     self.assertEqual(prepare.call_args.args[1], 'source_only')
                     self.assertEqual(prepare.call_args.args[2], 'skipped' if skip else 'fail')
+
+
+    def test_evaluate_does_not_report_success_for_failed_parity(self):
+        import run as runner
+        import sys
+        with tempfile.TemporaryDirectory() as temporary:
+            args = ['run.py', '--stage', 'evaluate', '--condition', 'no-graph',
+                    '--run-dir', temporary, '--metal-python', sys.executable]
+            summary = {'conditions': {'source_only': {'comparison': {'status': 'fail'}}}}
+            with patch('sys.argv', args), patch.object(runner, 'evaluate'), patch.object(runner, 'summarize', return_value=summary):
+                with self.assertRaises(SystemExit) as caught:
+                    runner.main()
+                self.assertEqual(caught.exception.code, 1)
 
 
 if __name__ == '__main__':

@@ -39,6 +39,8 @@ def inventory(root):
 
 
 def discover(run, site):
+    if json.loads((run / "manifest.json").read_text()).get("protocol_version", 1) >= 6:
+        return discover_raw(run, site)
     destination = run / "platform-discovery"
     if destination.exists():
         raise ValueError("Discovery already exists; use a new run to change target evidence")
@@ -103,6 +105,8 @@ def verify_discovery(run):
 
 
 def freeze(run):
+    if json.loads((run / "manifest.json").read_text()).get("protocol_version", 1) >= 6:
+        return freeze_raw(run)
     verify_discovery(run)
     probes = json.loads((run / "platform-probe-result.json").read_text())
     if probes.get("status") != "pass":
@@ -234,3 +238,83 @@ def verify_live(run):
             path = Path(record["source_file"])
             if not path.is_file() or sha(path) != record["source_sha256"]:
                 raise ValueError("Installed live attention source changed")
+
+
+def discover_raw(run, site):
+    """Copy whole declared library packages, without hand-selected hook leads."""
+    destination = run / "platform-discovery"
+    if destination.exists():
+        raise ValueError("Discovery already exists; use a new run")
+    site = Path(site).resolve()
+    manifest = json.loads((run / "manifest.json").read_text())
+    index = {}
+    for package in manifest["target_packages"]:
+        if package not in ("mlx", "mlx_lm", "vllm_metal"):
+            raise ValueError("Undeclared target package")
+        for source in sorted((site / package).rglob("*.py")):
+            if not source.resolve().is_relative_to(site) or source.stat().st_size > 1_000_000:
+                raise ValueError("Library source outside bounds")
+            name = source.relative_to(site).as_posix()
+            target = destination / "source" / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+            index[name] = {"sha256": sha(target), "lines": len(target.read_text().splitlines())}
+    if not index:
+        raise ValueError("No target library Python source found")
+    save(destination / "index.json", {"files": index, "target_site": str(site),
+         "holdout": "No project-specific helpers, probes, live observations or completed ports supplied"})
+    save(run / "discovery-result.json", {"status": "pass", "method": "Whole declared library package source",
+         "files": len(index), "discovery_sha256": inventory(destination)})
+
+
+def freeze_raw(run):
+    verify_discovery(run)
+    if json.loads((run / "cpu-result.json").read_text()).get("status") != "pass":
+        raise ValueError("Independent CPU baseline must pass")
+    repository_graph.verify(run)
+    context = run / "shared-context"
+    if context.exists():
+        raise ValueError("Shared context already frozen")
+    for condition in ("source_only", "source_validated_dag"):
+        if subprocess.check_output(["git", "status", "--porcelain"], cwd=run / condition / "candidate").strip():
+            raise ValueError("Cannot freeze into a changed candidate")
+    shutil.copytree(run / "platform-discovery/source", context / "source")
+    (context / "README.md").write_text("Unmodified Python sources of declared target library packages.\n"
+        "Discover integration behavior from these libraries and the source repository.\n"
+        "No project-specific implementation, helper, probe or runtime observation is supplied.\n")
+    note = Path(__file__).resolve().parents[2] / "translation/hook_primitives.md"
+    shutil.copyfile(note, context / "HOOK_CORRESPONDENCE.md")
+    protocol = json.loads((run / "protocol.json").read_text())
+    protocol["shared_context_files"] = inventory(context)
+    protocol["retrieval_files"] = inventory(run / "target-retrieval")
+    protocol["condition_context_files"] = {}
+    for condition in ("source_only", "source_validated_dag"):
+        directory = run / condition
+        candidate = directory / "candidate"
+        shutil.copytree(context, candidate / "platform_reference")
+        prompt = (directory / "prompt.md").read_text()
+        prompt += "\nTarget library source: platform_reference/source/. Discover relevant files yourself. Shared general hook correspondence: platform_reference/HOOK_CORRESPONDENCE.md. This provides no application-specific implementation.\n"
+        if condition == "source_validated_dag":
+            shutil.copytree(run / "target-retrieval", candidate / "target_relationships")
+            prompt += "\nSupplied graph input: target_relationships/relationships.md indexes target-library relationships. No example-specific query or seeds were selected.\n"
+            if protocol.get("protocol_version", 1) >= 7:
+                prompt += "Source repository graph: target_relationships/source/relationships.md. Select relevant subgraphs and generate any intermediate example-specific graph or plan yourself.\n"
+        protocol["condition_context_files"][condition] = inventory(candidate / "target_relationships")
+        subprocess.run(["git", "add", "platform_reference", *(["target_relationships"] if condition == "source_validated_dag" else [])], cwd=candidate, check=True)
+        subprocess.run(["git", "-c", "user.name=Experiment", "-c", "user.email=experiment@localhost", "-c", "commit.gpgsign=false", "commit", "-qm", "Frozen raw library source"], cwd=candidate, check=True)
+        (directory / "prompt.md").write_text(prompt)
+        protocol["prompt_sha256"][condition] = hashlib.sha256(prompt.encode()).hexdigest()
+    protocol["condition_labels"] = {"source_only": "source + raw libraries; no supplied implementation helpers",
+        "source_validated_dag": "identical source/libraries + unseeded static library graph"}
+    protocol["limits"] = "Single pilot; adapter acceptance contract supplied equally. No fixed token budget or demonstrated graph advantage."
+    if protocol.get("protocol_version", 1) >= 7:
+        protocol["input_policy"] = {
+            "shared": ["source_repository", "raw_target_libraries", "general_platform_mappings", "validation_interface_and_settings"],
+            "graph_condition_only": ["machine_extracted_source_and_target_graphs"],
+            "handwritten_example_recipe_supplied": False,
+            "generated_example_specific_graphs_and_plans_allowed": True,
+            "graph_design": json.loads((run / "manifest.json").read_text())["graph_input"]}
+        protocol["condition_labels"]["source_validated_dag"] = "same shared inputs + source and target static graphs"
+    save(run / "protocol.json", protocol)
+    save(run / "freeze-result.json", {"status": "pass", "files": protocol["shared_context_files"],
+        "live_observation_required": False, "implementation_helpers_supplied": False})

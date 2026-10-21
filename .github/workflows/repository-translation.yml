@@ -32,7 +32,7 @@ on:
       manifest:
         description: Frozen experiment configuration for prepare
         required: true
-        default: .github/translation/attention_tracker/manifest.retrieval.json
+        default: .github/translation/attention_tracker/manifest.discovery.json
       run_dir:
         description: Persistent artifact directory; prepare requires a new directory
         required: true
@@ -154,6 +154,8 @@ jobs:
             ${{ inputs.run_dir }}/**/*.md
             ${{ inputs.run_dir }}/**/*.log
             ${{ inputs.run_dir }}/**/*.patch
+            ${{ inputs.run_dir }}/source_only/candidate/translation_discovery/**
+            ${{ inputs.run_dir }}/source_validated_dag/candidate/translation_discovery/**
             ${{ inputs.run_dir }}/shared-context/**
             ${{ inputs.run_dir }}/platform-discovery/**
             ${{ inputs.run_dir }}/live-platform/**

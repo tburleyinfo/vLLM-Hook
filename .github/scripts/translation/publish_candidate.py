@@ -57,9 +57,9 @@ def publish(bundle, repo, base, checkout):
         command(['git', 'apply', '--cached', '--check', str(patch.resolve())], checkout, env)
         command(['git', 'apply', '--cached', str(patch.resolve())], checkout, env)
         paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z', parent], cwd=checkout, env=env).decode().split('\0')
-        allowed = {'README.md', 'attention_tracker_metal.py', 'metal_capture_helpers.py', 'notebooks/metal/demo_attntracker_metal.ipynb'}
-        if not any(paths) or any(path not in allowed for path in paths if path):
-            raise ValueError('Patch changes files outside the Attention Tracker delivery scope')
+        protected = {'.git', '.github', 'platform_reference', 'target_relationships', 'translation_discovery'}
+        if not any(paths) or any(Path(path).parts[0] in protected for path in paths if path):
+            raise ValueError('Patch changes workflow infrastructure, supplied evidence or internal discovery artifacts')
         tree = command(['git', 'write-tree'], checkout, env)
         title = f'Attention Tracker Metal translation ({metadata["condition"]})'
         branch = f'translation/{metadata["condition"]}-{parent[:10]}-{sha[:12]}'
