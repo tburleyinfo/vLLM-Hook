@@ -16,6 +16,3 @@ ignore/
 
 # GPU test environments, wheels and results
 .gpu-ci/
-
-# Frozen translation runs and inference evidence
-experiment-runs/
