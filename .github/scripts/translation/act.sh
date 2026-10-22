@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$repo_root"
 stage="${1:-run}"
 run_dir="${2:-experiment-runs/translation/local-$(date +%Y%m%d-%H%M%S)}"
-args=(workflow_dispatch -j experiment -W .github/workflows/repository-translation.yml -P self-hosted=-self-hosted
+args=(workflow_dispatch -j experiment -W .github/workflows/repository-translation.yml -P ubuntu-latest=-self-hosted
   --input "stage=$stage" --input "run_dir=$run_dir"
   --input "manifest=${TRANSLATION_MANIFEST:-.github/translation/manifest.json}"
   --input "condition=${TRANSLATION_CONDITION:-no-graph}"
