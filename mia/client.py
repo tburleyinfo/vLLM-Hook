@@ -16,7 +16,7 @@ import torch
 from transformers import AutoTokenizer
 
 from mia._profiler import PROF
-from mia.errors import MiaDeliveryError
+from mia.errors import MiaConfigurationError, MiaDeliveryError
 from mia.registry import PluginRegistry
 from mia.artifacts import dispatch_disk_analyze
 
@@ -87,6 +87,16 @@ class MiaClient:
         capture: bool,
     ) -> Optional[Dict]:
         """The `vllm_xargs` for one request, or None when it asks for nothing of MIA."""
+        from mia.llm import _metal_plugin_selected
+
+        if _metal_plugin_selected() and (capture or steer is not None or extra_xargs):
+            raise MiaConfigurationError(
+                "MiaClient capture and steering are not supported with "
+                "VLLM_PLUGINS=metal: vLLM-Metal does not load MIA's server-side "
+                "instrumentation. Use capture=False without MIA-specific extra_xargs "
+                "for a plain OpenAI-compatible request."
+            )
+
         xargs: Dict[str, Any] = {}
         if capture:
             xargs.update(self._build_extra_body()["vllm_xargs"])

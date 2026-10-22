@@ -13,9 +13,11 @@ This includes dynamic analysis of:
 - activations  
 - custom intervention behaviors  
 
-MIA is vLLM-Hook for vLLM 0.29 and its V2 model runner, under CUDA graphs by default. Two ways to run it:
-- **`MiaLLM`** (offline): builds the vLLM engine in your own Python process; for scripts, notebooks and batch jobs.
-- **`vllm serve` + `MiaClient`** (served): MIA runs inside the vLLM server; for serving, or several clients sharing one engine.
+MIA's original capture and steering implementation targets vLLM's V2 PyTorch runner. This
+repository is being moved to vLLM-Metal for Apple Silicon. With `VLLM_PLUGINS=metal`, `MiaLLM`
+continues to expose normal vLLM generation when constructed without a MIA worker. Capture,
+analysis from live captures, steering, and the MIA server plugin are not yet implemented for the
+Metal runner; these paths now fail explicitly where the offline API can detect the configuration.
 
 New here? Start with the [Quickstart](#-quickstart).
 
@@ -31,13 +33,9 @@ New here? Start with the [Quickstart](#-quickstart).
 
 ## 🚀 Features
 
-- **Model-agnostic plugin system** for vLLM engines — no model files are rewritten
-  ([model compatibility](docs/configs.md#model-compatibility))  
-- **Extensible worker/analyzer abstraction**  
-  - Easy to add analyzers ([adding a worker or analyzer](#adding-a-worker-or-analyzer))  
-- **Introspection** of model internals  
-- **Interventions** (activation steering)  
-- **CUDA graphs by default** — capture and steering keep the engine's CUDA graphs  
+- **vLLM generation** through `MiaLLM` on the selected vLLM backend
+- Existing analyzers, artifact formats, capture workers, and steering API are retained for the
+  original PyTorch runner; Metal instrumentation support is not claimed
 - **Example applications**:  
   - Safety guardrails  
   - Reranking  
@@ -47,9 +45,10 @@ New here? Start with the [Quickstart](#-quickstart).
 
 ## 📊 Performance
 
-Capture and steering cost a few percent of decode throughput and keep the engine's CUDA graphs.
-Measured on vLLM 0.29.0 + the V2 runner, server path, K=3 median, against the native vLLM tier of
-the same launch (TPOT overhead):
+The following historical CUDA measurements describe the original implementation only; they are
+not Metal benchmarks or evidence of Metal instrumentation performance. They were measured on
+vLLM 0.29.0 + the V2 runner, server path, K=3 median, against the native vLLM tier of the same
+launch (TPOT overhead):
 
 | req/s | 1 | 4 | 8 | 16 |
 |---|---|---|---|---|
@@ -63,39 +62,22 @@ Capture saturates at rate 32; steering holds to 64 (+5.2 %).
 
 ## 🧩 Supported Configurations
 
-MIA runs in your own process (`MiaLLM`) and on the server path (`vllm serve` + `MiaClient`),
-under CUDA graphs. Each capture use case (attention tracker, hidden-state extraction, …) runs with
-either storage (`rpc` / `disk`) and disk format (`pt` / `safetensors`); CoRe is disk-only, and
-steering writes no artifact. See [`docs/configs.md`](docs/configs.md) for code snippets showing
-how to select each config.
-
-MIA requires vLLM's **V2 model runner** and runs every worker under CUDA graphs by default:
-
-- default `cudagraph_mode` is `FULL_AND_PIECEWISE`: FULL graphs for decode, piecewise graphs for
-  mixed steps;
-- `FULL_DECODE_ONLY` is accepted, and is used when the compilation mode is not the default or
-  `TORCH_COMPILE_DISABLE=1` is set;
-- `FULL` is accepted with a warning: it can compute wrong attention on FlashAttention 3 (vLLM 0.29);
-- `enforce_eager=True` (`vllm serve --enforce-eager`) opts out; `PIECEWISE` alone is refused.
-
-Tensor parallelism (TP > 1) is supported for `capture_hs`, `capture_qk` and `steer`: each capturing
-rank writes its own `tp_rank_<r>/` directory and MIA's loaders merge them. Pipeline parallelism is
-not supported, and Q/K `score` capture requires TP = 1.
+Metal generation runs through vLLM-Metal's MLX-backed model runner. That runner is not
+vLLM's V2 GPU/CPU model runner: it does not expose the PyTorch module tree, input-batch hooks,
+CUDA graph dispatch, or CUDA custom-op path expected by MIA's current capture workers.
+Consequently, MIA capture workers (`capture_hs`, `capture_qk`), activation steering, aperture
+delivery, and server-side MIA probes are unsupported on Metal. The established public Python
+classes remain available, and the offline generation-only `MiaLLM` path is supported.
 
 ---
 
 ## 📦 Installation
 
 **Requirements**
-- Linux and an NVIDIA GPU with a CUDA 13 driver; validated on an H100 80 GB.
-- Python 3.11–3.14; validated on 3.12.
-- About 12 GB for the environment, plus the models, downloaded on first use (the hidden-state,
-  steering, attention-tracker and capture-aperture demos need about 33 GB).
-- GPU memory: capture keeps a 4 GiB buffer outside vLLM's `gpu_memory_utilization` share. The demos
-  use 0.7 and models up to 8B (a 40 GB card or larger); on a smaller card lower
-  `gpu_memory_utilization` (`--gpu-memory-utilization` on a server) or set `MIA_APERTURE_GPU_BYTES`
-  ([sizing](docs/configs.md#sizing-the-capture-aperture-and-the-gpu-memory-it-costs)).
-- Gated models (Llama, Mistral) need `hf auth login`.
+- Apple Silicon and a supported vLLM-Metal installation.
+- Python version and model support are determined by the installed vLLM-Metal release.
+- Unified-memory requirements depend on the model and its context length.
+- Gated models require Hugging Face authentication.
 
 ### 1. Clone the repository
 
@@ -106,136 +88,62 @@ cd ./vLLM-Hook
 
 ### 2. Create an environment and install
 
-MIA is validated on **vLLM 0.29.0 with torch 2.13.0**:
+Install this repository with the Metal extra in a vLLM-Metal-supported Apple Silicon environment:
 
 ```bash
-conda create -n vllm-hook-mia python=3.12 pip
-conda activate vllm-hook-mia
-pip install -r requirement.txt    # vLLM 0.29.0, torch 2.13.0 and the other validated versions
-pip uninstall -y torchcodec       # vLLM's audio/video decoder; MIA does not use it
-pip install -e . --no-deps        # the plugin itself, from the repo root
-pip install pytest                # for the check below
+python -m venv .venv
+source .venv/bin/activate
+pip install -e '.[metal]'
 ```
 
-Versions match [`requirement.txt`](requirement.txt). `pip check` flags the removed `torchcodec`; that is expected.
-
-MIA registers itself as a vLLM plugin, so every vLLM engine in this environment loads it: without
-`MIA_WORKER` it installs the hidden-state capture worker (and its 4 GiB GPU buffer) in every
-engine. Keep a dedicated environment; set `VLLM_PLUGINS=''` to run stock vLLM in it.
-
-### 3. Check the install
-
-Needs a GPU — the use-case tests boot a real engine for each test model
-([`tests/README.md`](tests/README.md)):
+The dependency pin follows the supplied vLLM-Metal source version (`0.2.0`); the target package
+provides the matching vLLM and MLX runtime dependencies. Select the Metal plugin and the requested
+runtime defaults before starting Python:
 
 ```bash
-pytest tests/use_cases -m gpu
+export VLLM_PLUGINS=metal
+export VLLM_ENABLE_V1_MULTIPROCESSING=0
+export VLLM_METAL_USE_PAGED_ATTENTION=0
+export VLLM_METAL_MEMORY_FRACTION=auto
 ```
 
 ---
 
 ## ⚡ Quickstart
 
-Run these from the repo root (the configs name repo-relative steering vectors).
-
-**Capture hidden states, offline:**
+Generation-only offline use (set `MODEL` to a model identifier or local checkpoint path):
 
 ```python
-import multiprocessing as mp
 import os
-
 from vllm import SamplingParams
-
 from mia import MiaLLM
 
-if __name__ == "__main__":
-    mp.set_start_method("spawn", force=True)
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    llm = MiaLLM(model="Qwen/Qwen2-1.5B-Instruct", worker_name="capture_hs",
-                 analyzer_name="hidden_states",
-                 config_file="model_configs/hidden_states/Qwen2-1.5B-Instruct.json",
-                 gpu_memory_utilization=0.7, max_model_len=2048)
-    out = llm.generate("The capital of France is", SamplingParams(temperature=0.0, max_tokens=10))
-    stats = llm.analyze(analyzer_spec={"reduce": "none"}, probes=out[0].probes)
-    for layer, tensors in sorted(stats["hidden_states"].items()):
-        print(layer, tuple(tensors[0].shape))
-    llm.llm_engine.engine_core.shutdown()
+llm = MiaLLM(model=os.environ["MODEL"])
+outputs = llm.generate(
+    "Hello",
+    SamplingParams(temperature=0.0, max_tokens=16),
+)
+print(outputs[0].outputs[0].text)
 ```
 
-**Steer, offline:**
-
-```python
-import multiprocessing as mp
-import os
-
-from vllm import SamplingParams
-
-from mia import MiaLLM
-
-if __name__ == "__main__":
-    mp.set_start_method("spawn", force=True)
-    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    llm = MiaLLM(model="microsoft/Phi-3-mini-4k-instruct", worker_name="steer",
-                 config_file="model_configs/activation_steer/Phi-3-mini-4k-instruct.json",
-                 gpu_memory_utilization=0.7, max_model_len=4096)
-    steer = {"method": "add_vector", "coefficient": 10}   # overrides the config's steering keys
-    sp = SamplingParams(temperature=0.0, max_tokens=100, extra_args={"steer": steer})
-    print(llm.generate("Write three bullet points about tea.", sp)[0].outputs[0].text)
-    llm.llm_engine.engine_core.shutdown()
-```
-
-**Served:** start the server in one shell and wait for `Application startup complete.` (about a
-minute); run the client in a second shell; stop the server with Ctrl-C.
+Equivalent standard vLLM use is also supported:
 
 ```bash
-VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=hidden_states \
-    vllm serve Qwen/Qwen2-1.5B-Instruct \
-    --max-model-len 2048 --port 8770 --gpu-memory-utilization 0.8
+MODEL=/path/to/model python -c 'from vllm import LLM, SamplingParams; import os; print(LLM(os.environ["MODEL"]).generate("Hello", SamplingParams(max_tokens=16))[0].outputs[0].text)'
 ```
 
-```python
-from mia import MiaClient
-
-client = MiaClient(base_url="http://localhost:8770/v1", analyzer_name="hidden_states",
-                   config_file="model_configs/hidden_states/Qwen2-1.5B-Instruct.json")
-client.generate(messages=[{"role": "user", "content": "The capital of France is"}],
-                model="Qwen/Qwen2-1.5B-Instruct", max_tokens=10, temperature=0.0)
-stats = client.analyze(analyzer_spec={"reduce": "none"})
-for layer, tensors in sorted(stats["hidden_states"].items()):
-    print(layer, tuple(tensors[0].shape))
-```
-
-Steering over `vllm serve` needs only the `openai` client; the steer config travels JSON-encoded:
-
-```bash
-VLLM_WORKER_MULTIPROC_METHOD=spawn MIA_WORKER=steer \
-    vllm serve microsoft/Phi-3-mini-4k-instruct --max-model-len 4096 --port 8770
-```
-
-```python
-import json
-
-import openai
-
-with open("model_configs/activation_steer/Phi-3-mini-4k-instruct.json") as f:
-    steer = {**json.load(f)["steering"], "method": "add_vector", "coefficient": 10}
-client = openai.OpenAI(base_url="http://localhost:8770/v1", api_key="EMPTY")
-response = client.chat.completions.create(
-    model="microsoft/Phi-3-mini-4k-instruct", max_tokens=100, temperature=0.0,
-    messages=[{"role": "user", "content": "Write three bullet points about tea."}],
-    extra_body={"vllm_xargs": {"steer": json.dumps(steer)}})
-print(response.choices[0].message.content)
-```
-
-Next: [`examples/README.md`](examples/README.md) (where data lands, configs, server mode) and
-[`docs/configs.md`](docs/configs.md) (every config key, per-request argument and env var).
+Do not pass `worker_name="capture_hs"`, `"capture_qk"`, or `"steer"` to `MiaLLM` under
+`VLLM_PLUGINS=metal`: these features are unsupported and the offline API raises
+`MiaConfigurationError` rather than pretending instrumentation ran. `vllm serve` generation
+works with the Metal plugin, but MIA's `MiaClient` probe/capture endpoints are not available.
 
 ---
 
 ## 👉 Usage
 
-Every demo runs offline: it builds a `MiaLLM` engine in your process, captures or steers, and
-reads the data back. From the repo root:
+The included capture and steering demos target the original PyTorch runner and are not Metal
+compatible. Their commands below are historical usage only; use the generation-only quickstart
+above with vLLM-Metal. The use-case documentation likewise does not imply Metal support.
 
 ```bash
 python examples/demo_hiddenstate.py
@@ -305,8 +213,8 @@ Each component handles a key stage of the plugin lifecycle:
 - **Registry** — manages available hooks and extensions  
 - **Workers** — define execution behavior and orchestration  
 - **Analyzers** — optionally conduct analysis based on the saved statistics  
-- **Core** — the capture and steering engine, in four subpackages  
-  - `hooks/` — installs the capture and steering ops  
+- **Core** — the original capture and steering engine, in four subpackages  
+  - `hooks/` — installs the PyTorch capture and steering ops  
   - `aperture/` — the GPU capture aperture under CUDA graphs  
   - `delivery/` — routes, writes and delivers captured artifacts  
   - `runtime/` — CPU budget, child-process, device and TP-shard helpers  
@@ -349,8 +257,8 @@ We welcome contributions from the community!
   `analyze(analyzer_spec, run_id=None, probes=None)`; register it with
   `PluginRegistry.register_analyzer("name", Cls)` and pass `analyzer_name="name"`.
   `mia/analyzers/hidden_states_analyzer.py` is the smallest example.
-- **Worker:** MIA's three workers each bake their own op into the CUDA graph. A new worker class
-  installs forward hooks, which only run in eager mode: build its engine with
+- **Worker:** MIA's three original workers bake their own op into the CUDA graph. A new worker class
+  installs PyTorch forward hooks, which only run in eager mode: build its engine with
   `enforce_eager=True` (`--enforce-eager`).
 
 ---
