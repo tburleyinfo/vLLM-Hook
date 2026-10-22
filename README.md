@@ -319,6 +319,14 @@ Full detail: [`mia/README.md`](mia/README.md).
 
 ---
 
+## Repository translation workflow
+
+Translate the repository between declared backends with or without supplied
+source and target dependency graphs, save artifacts and open a draft pull request.
+Example-specific validation is optional and runs only after generation, outside
+the translator's inputs. See the [workflow setup and review instructions](.github/translation/README.md)
+for action inputs, local `act` usage, runner dependencies and W&B tracking.
+
 ## 🤝 Contributing
 
 We welcome contributions from the community!  
