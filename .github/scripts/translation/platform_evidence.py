@@ -104,9 +104,9 @@ def verify_discovery(run):
         raise ValueError("Discovery evidence changed after collection")
 
 
-def freeze(run):
+def freeze(run, require_cpu_baseline=True):
     if json.loads((run / "manifest.json").read_text()).get("protocol_version", 1) >= 6:
-        return freeze_raw(run)
+        return freeze_raw(run, require_cpu_baseline=require_cpu_baseline)
     verify_discovery(run)
     probes = json.loads((run / "platform-probe-result.json").read_text())
     if probes.get("status") != "pass":
@@ -267,9 +267,9 @@ def discover_raw(run, site):
          "files": len(index), "discovery_sha256": inventory(destination)})
 
 
-def freeze_raw(run):
+def freeze_raw(run, require_cpu_baseline=True):
     verify_discovery(run)
-    if json.loads((run / "cpu-result.json").read_text()).get("status") != "pass":
+    if require_cpu_baseline and json.loads((run / "cpu-result.json").read_text()).get("status") != "pass":
         raise ValueError("Independent CPU baseline must pass")
     repository_graph.verify(run)
     context = run / "shared-context"
@@ -285,6 +285,7 @@ def freeze_raw(run):
     note = Path(__file__).resolve().parents[2] / "translation/hook_primitives.md"
     shutil.copyfile(note, context / "HOOK_CORRESPONDENCE.md")
     protocol = json.loads((run / "protocol.json").read_text())
+    protocol["cpu_baseline_required_for_freeze"] = require_cpu_baseline
     protocol["shared_context_files"] = inventory(context)
     protocol["retrieval_files"] = inventory(run / "target-retrieval")
     protocol["condition_context_files"] = {}

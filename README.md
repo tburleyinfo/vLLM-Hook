@@ -319,6 +319,13 @@ Full detail: [`mia/README.md`](mia/README.md).
 
 ---
 
+## Repository translation workflow
+
+Generate an Attention Tracker Metal candidate with or without supplied dependency
+graphs, save its artifacts and open a draft pull request. Validation is optional
+while reviewing the generated port. See the [workflow setup and review instructions](.github/translation/README.md)
+for action inputs, runner dependencies, W&B tracking and offline packaging checks.
+
 ## 🤝 Contributing
 
 We welcome contributions from the community!  

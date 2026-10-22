@@ -10,18 +10,19 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: prepare, baseline, discover, probe, live-probe, retrieve, freeze, source-compatibility, translate, evaluate, summary, finish
-        required: true
-        default: prepare
+        description: run prepares, generates and packages in one job; other stages resume a prepared run
+        type: choice
+        options: [run, prepare, baseline, discover, retrieve, freeze, translate, evaluate, summary, finish]
+        default: run
       condition:
         description: Candidate to translate (both is research only)
         type: choice
         options: [no-graph, graph, both]
         default: no-graph
       run_tests:
-        description: Run Metal parity validation during finish
+        description: Run CPU and Metal validation (optional for draft generation)
         type: boolean
-        default: true
+        default: false
       create_draft_pr:
         description: Open a draft for one candidate after finish
         type: boolean
@@ -34,9 +35,9 @@ on:
         required: true
         default: .github/translation/attention_tracker/manifest.discovery.json
       run_dir:
-        description: Persistent artifact directory; prepare requires a new directory
-        required: true
-        default: experiment-runs/attention-tracker/local
+        description: Optional persistent directory for staged runs; leave blank for a unique run directory
+        required: false
+        default: ''
       pilot:
         description: Label Auto model routing as pilot evidence
         required: true
@@ -52,6 +53,7 @@ permissions:
 jobs:
   protocol-checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -61,6 +63,17 @@ jobs:
           python-version: '3.12'
       - name: Check experiment protocol and isolated PR publication
         run: python -m unittest discover -s tests/workflows/translation -p 'test_*.py'
+      - name: Exercise both draft bundles without a model or GPU
+        run: python tests/workflows/translation/smoke_delivery.py --output "$RUNNER_TEMP/translation-smoke"
+      - name: Upload offline delivery fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: translation-delivery-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/translation-smoke/*/bundle/**
+            ${{ runner.temp }}/translation-smoke/*/report.json
+          if-no-files-found: error
+          retention-days: 7
 
   experiment:
     if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -69,6 +82,7 @@ jobs:
     timeout-minutes: 40
     outputs:
       bundle_ready: ${{ steps.bundle.outputs.ready }}
+      evidence_url: ${{ steps.evidence.outputs.artifact-url }}
     steps:
       - name: Checkout experiment harness
         if: ${{ !env.ACT }}
@@ -76,6 +90,13 @@ jobs:
         with:
           fetch-depth: 0
           clean: false
+      - name: Prepare isolated tracking tools
+        if: ${{ inputs.stage == 'run' || inputs.stage == 'translate' || inputs.stage == 'finish' || inputs.stage == 'evaluate' || inputs.stage == 'summary' }}
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/translation-tools"
+          "$RUNNER_TEMP/translation-tools/bin/python" -m pip install -r .github/translation/requirements-tracking.txt
+          echo "TRANSLATION_PYTHON=$RUNNER_TEMP/translation-tools/bin/python" >> "$GITHUB_ENV"
       - name: Run frozen experiment stage
         id: experiment
         continue-on-error: true
@@ -97,12 +118,26 @@ jobs:
           ATTN_COPILOT_BIN: ${{ vars.ATTN_COPILOT_BIN }}
           ATTN_COPILOT_HOME: ${{ vars.ATTN_COPILOT_HOME }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          TRANSLATION_REQUIRE_WANDB: 'true'
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          WANDB_ENTITY: ${{ vars.TRANSLATION_WANDB_ENTITY }}
+          WANDB_PROJECT: ${{ vars.TRANSLATION_WANDB_PROJECT }}
         run: |
           set -euo pipefail
           if [[ "${ACT:-}" == "true" ]]; then
             cd "$ATTN_LOCAL_REPO"
           fi
-          if [[ "${ACT:-}" != "true" && "$EXPERIMENT_STAGE" == "prepare" ]]; then
+          if [[ -z "$EXPERIMENT_RUN_DIR" ]]; then
+            [[ "$EXPERIMENT_STAGE" == "run" ]] || { echo 'A run_dir is required for separate stages'; exit 1; }
+            EXPERIMENT_RUN_DIR="$RUNNER_TEMP/translation-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          fi
+          echo "TRANSLATION_RUN_DIR=$EXPERIMENT_RUN_DIR" >> "$GITHUB_ENV"
+          if [[ "$EXPERIMENT_STAGE" == "run" || "$EXPERIMENT_STAGE" == "finish" ]]; then
+            if [[ "$CREATE_DRAFT" == "true" && "$EXPERIMENT_CONDITION" == "both" ]]; then
+              echo 'Choose graph or no-graph for a draft PR'; exit 1
+            fi
+          fi
+          if [[ "${ACT:-}" != "true" && ( "$EXPERIMENT_STAGE" == "prepare" || "$EXPERIMENT_STAGE" == "run" ) ]]; then
             source_revision="$(python3 -c 'import json; print(json.load(open(__import__("os").environ["EXPERIMENT_MANIFEST"]))["source_revision"])')"
             [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]]
             if ! git cat-file -e "$source_revision^{commit}" 2>/dev/null; then
@@ -120,7 +155,7 @@ jobs:
             args+=(--baseline-run "$EXPERIMENT_BASELINE_RUN")
           fi
           args+=(--condition "$EXPERIMENT_CONDITION")
-          if [[ "$EXPERIMENT_STAGE" == "finish" ]]; then
+          if [[ "$EXPERIMENT_STAGE" == "finish" || "$EXPERIMENT_STAGE" == "run" ]]; then
             if [[ "$RUN_TESTS" == "false" ]]; then args+=(--skip-tests); fi
             if [[ "$CREATE_DRAFT" == "true" ]]; then
               [[ "$EXPERIMENT_CONDITION" != "both" ]] || { echo 'Choose graph or no-graph for a draft PR'; exit 1; }
@@ -128,10 +163,10 @@ jobs:
               args+=(--prepare-pr "$RUNNER_TEMP/attention-tracker-pr")
             fi
           fi
-          python3 .github/scripts/translation/run.py "${args[@]}"
+          "${TRANSLATION_PYTHON:-python3}" .github/scripts/translation/run.py "${args[@]}"
       - name: Check publication bundle
         id: bundle
-        if: ${{ always() && inputs.stage == 'finish' && inputs.create_draft_pr && !env.ACT }}
+        if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && inputs.create_draft_pr && !env.ACT }}
         shell: bash
         run: |
           if [[ -f "$RUNNER_TEMP/attention-tracker-pr/metadata.json" ]]; then
@@ -145,26 +180,26 @@ jobs:
           path: ${{ runner.temp }}/attention-tracker-pr/
           if-no-files-found: error
       - name: Upload experiment evidence
-        if: ${{ always() && !env.ACT }}
+        id: evidence
+        if: ${{ always() && !env.ACT && env.TRANSLATION_RUN_DIR != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: attention-tracker-experiment
+          name: translation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ inputs.run_dir }}/**/*.json
-            ${{ inputs.run_dir }}/**/*.md
-            ${{ inputs.run_dir }}/**/*.log
-            ${{ inputs.run_dir }}/**/*.patch
-            ${{ inputs.run_dir }}/source_only/candidate/translation_discovery/**
-            ${{ inputs.run_dir }}/source_validated_dag/candidate/translation_discovery/**
-            ${{ inputs.run_dir }}/shared-context/**
-            ${{ inputs.run_dir }}/platform-discovery/**
-            ${{ inputs.run_dir }}/live-platform/**
-            ${{ inputs.run_dir }}/source_dag.mmd
-            ${{ inputs.run_dir }}/source_only/candidate/attention_tracker_metal.py
-            ${{ inputs.run_dir }}/source_validated_dag/candidate/attention_tracker_metal.py
-            ${{ inputs.run_dir }}/source_only/candidate/notebooks/metal/demo_attntracker_metal.ipynb
-            ${{ inputs.run_dir }}/source_validated_dag/candidate/notebooks/metal/demo_attntracker_metal.ipynb
+            ${{ env.TRANSLATION_RUN_DIR }}/**/*.json
+            ${{ env.TRANSLATION_RUN_DIR }}/**/*.md
+            ${{ env.TRANSLATION_RUN_DIR }}/**/*.log
+            ${{ env.TRANSLATION_RUN_DIR }}/**/*.patch
+            ${{ env.TRANSLATION_RUN_DIR }}/source_only/candidate/**/*.ipynb
+            ${{ env.TRANSLATION_RUN_DIR }}/source_validated_dag/candidate/**/*.ipynb
+            ${{ env.TRANSLATION_RUN_DIR }}/source_only/candidate/translation_discovery/**
+            ${{ env.TRANSLATION_RUN_DIR }}/source_validated_dag/candidate/translation_discovery/**
+            ${{ env.TRANSLATION_RUN_DIR }}/shared-context/**
+            ${{ env.TRANSLATION_RUN_DIR }}/platform-discovery/**
+            ${{ env.TRANSLATION_RUN_DIR }}/target-retrieval/**
+            ${{ env.TRANSLATION_RUN_DIR }}/source_dag.mmd
           if-no-files-found: warn
+          retention-days: 14
 
       - name: Preserve experiment failure
         if: ${{ always() && steps.experiment.outcome == 'failure' }}
@@ -172,7 +207,7 @@ jobs:
 
   publish:
     needs: experiment
-    if: ${{ always() && inputs.stage == 'finish' && inputs.create_draft_pr && inputs.condition != 'both' && needs.experiment.outputs.bundle_ready == 'true' }}
+    if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && inputs.create_draft_pr && inputs.condition != 'both' && needs.experiment.outputs.bundle_ready == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -187,7 +222,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_BASE: ${{ inputs.pr_base }}
+          EVIDENCE_URL: ${{ needs.experiment.outputs.evidence_url }}
         run: |
           python3 .github/scripts/translation/publish_candidate.py \
             --bundle "$RUNNER_TEMP/attention-tracker-pr" \
-            --repo "$GITHUB_REPOSITORY" --base "$PR_BASE"
+            --repo "$GITHUB_REPOSITORY" --base "$PR_BASE" --artifact-url "$EVIDENCE_URL"

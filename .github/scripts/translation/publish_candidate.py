@@ -37,12 +37,15 @@ def prepare(run, condition, validation, output):
         f'Source: `{manifest["source_revision"]}`\n\nPatch SHA-256: `{sha}`\n')
 
 
-def publish(bundle, repo, base, checkout):
+def publish(bundle, repo, base, checkout, artifact_url=None):
     metadata = json.loads((bundle / 'metadata.json').read_text())
     patch = bundle / 'candidate.patch'
     sha = hashlib.sha256(patch.read_bytes()).hexdigest()
     if sha != metadata['patch_sha256'] or metadata['condition'] not in ('graph', 'no-graph'):
         raise ValueError('Invalid publication bundle')
+    body = (bundle / 'body.md').read_text()
+    if artifact_url:
+        body += f'\n[Download the generation reports, discovery artifacts and original patch]({artifact_url}).\n'
     origin = command(['git', 'remote', 'get-url', 'origin'], checkout)
     if origin.removesuffix('.git').rstrip('/') not in (f'https://github.com/{repo}', f'git@github.com:{repo}'):
         raise ValueError('Destination must match origin')
@@ -63,9 +66,13 @@ def publish(bundle, repo, base, checkout):
         tree = command(['git', 'write-tree'], checkout, env)
         title = f'Attention Tracker Metal translation ({metadata["condition"]})'
         branch = f'translation/{metadata["condition"]}-{parent[:10]}-{sha[:12]}'
+        body_file = Path(temporary) / 'body.md'
+        body_file.write_text(body)
         existing = command(['gh', 'pr', 'list', '--repo', repo, '--head', branch, '--state', 'open', '--json', 'url'], checkout)
         if json.loads(existing):
-            print(json.loads(existing)[0]['url'])
+            url = json.loads(existing)[0]['url']
+            command(['gh', 'pr', 'edit', url, '--repo', repo, '--body-file', str(body_file)], checkout)
+            print(url)
             return
         remote = command(['git', 'ls-remote', '--heads', 'origin', branch], checkout)
         if remote:
@@ -78,7 +85,7 @@ def publish(bundle, repo, base, checkout):
             commit = command(['git', 'commit-tree', tree, '-p', parent, '-m', title], checkout, env)
         command(['git', 'push', 'origin', f'{commit}:refs/heads/{branch}'], checkout)
         print(command(['gh', 'pr', 'create', '--repo', repo, '--base', base, '--head', branch,
-                       '--draft', '--title', title, '--body-file', str((bundle / 'body.md').resolve())], checkout))
+                       '--draft', '--title', title, '--body-file', str(body_file)], checkout))
 
 
 if __name__ == '__main__':
@@ -86,5 +93,6 @@ if __name__ == '__main__':
     parser.add_argument('--bundle', type=Path, required=True)
     parser.add_argument('--repo', required=True)
     parser.add_argument('--base', default='main')
+    parser.add_argument('--artifact-url', help='Evidence artifact URL to link from the draft')
     args = parser.parse_args()
-    publish(args.bundle, args.repo, args.base, Path.cwd())
+    publish(args.bundle, args.repo, args.base, Path.cwd(), args.artifact_url)

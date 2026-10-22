@@ -1,0 +1,2 @@
+# Optional SDK used only by real Actions translation trials, in an isolated tools environment.
+wandb==0.27.0

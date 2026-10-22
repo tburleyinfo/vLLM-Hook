@@ -63,6 +63,7 @@ class DeliveryTests(unittest.TestCase):
             (bundle / 'body.md').write_text('Validation: skipped')
             actual = delivery.command
             pushed = []
+            published_bodies = []
             def fake(args, cwd, env=None):
                 if args[:2] == ['git', 'fetch']:
                     (repo / '.git/FETCH_HEAD').write_text(base + '\n')
@@ -73,10 +74,14 @@ class DeliveryTests(unittest.TestCase):
                     pushed.append(args[-1].split(':')[0])
                     return ''
                 if args[0] == 'gh':
+                    if args[2] == 'create':
+                        self.assertIn('--draft', args)
+                        published_bodies.append(Path(args[args.index('--body-file') + 1]).read_text())
                     return '[]' if args[2] == 'list' else 'https://github.com/example/project/pull/1'
                 return actual(args, cwd, env)
             with patch.object(delivery, 'command', side_effect=fake):
-                delivery.publish(bundle, 'example/project', 'main', repo)
+                delivery.publish(bundle, 'example/project', 'main', repo, 'https://github.com/example/project/actions/runs/1/artifacts/2')
+            self.assertIn('https://github.com/example/project/actions/runs/1/artifacts/2', published_bodies[0])
             self.assertEqual(git('status', '--porcelain'), before)
             self.assertEqual((repo / '.git/index').read_bytes(), index)
             self.assertEqual(git('diff-tree', '--no-commit-id', '--name-only', '-r', pushed[0]), 'application.py')

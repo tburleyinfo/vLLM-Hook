@@ -18,6 +18,7 @@ import time
 import platform_evidence
 import repository_graph
 import publish_candidate
+import tracking
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
@@ -175,8 +176,10 @@ open PRs. Unsupported behavior must fail explicitly. State limitations honestly.
     if manifest.get("protocol_version", 1) >= 7:
         task = manifest["translation_task"]
         acceptance = f"""Translate the source repository from {task['source_backend']} to
-{task['target_backend']}. Preserve the source repository's observable behavior,
-public data contracts and lifecycle behavior. Discover the implementation details
+{task['target_backend']}. Real vllm.LLM.generate() through vLLM-Metal is required.
+Do not replace vLLM generation with standalone MLX generation or another engine.
+Preserve the source repository's observable behavior, public data contracts and
+lifecycle behavior. Discover the implementation details
 from the supplied source and libraries. Generate the translation yourself.
 
 Validation interface (a required public boundary, not an implementation recipe):
@@ -263,6 +266,16 @@ def baseline(run, python, model_timeout):
 
 
 def translate(run, condition, pilot=False):
+    tracking.register(run, condition)
+    try:
+        return generate_translation(run, condition, pilot)
+    except Exception as error:
+        write_json(run / condition / "translation-result.json", {"status": "fail", "error": str(error)})
+        summarize(run)
+        raise
+
+
+def generate_translation(run, condition, pilot=False):
     manifest = json.loads((run / "manifest.json").read_text())
     protocol = json.loads((run / "protocol.json").read_text())
     if protocol.get("protocol_version", 1) >= 2:
@@ -459,12 +472,14 @@ def summarize(run):
         preflight = result["metal_preflight"]
         lines += ["", f'Source compatibility check (does not establish platform incapability): {preflight["status"]}; {preflight.get("error", "")}']
     (run / "results.md").write_text("\n".join(lines) + "\n")
+    for condition, row in rows.items():
+        tracking.update(run, condition, row)
     return result
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices=["prepare", "baseline", "metal-preflight", "source-compatibility", "discover", "probe", "live-probe", "retrieve", "freeze", "translate", "evaluate", "summary", "finish"], required=True)
+    parser.add_argument("--stage", choices=["run", "prepare", "baseline", "metal-preflight", "source-compatibility", "discover", "probe", "live-probe", "retrieve", "freeze", "translate", "evaluate", "summary", "finish"], required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=PROFILE / "manifest.discovery.json")
     parser.add_argument("--target-site")
@@ -478,11 +493,30 @@ def main():
     parser.add_argument("--prepare-pr", type=Path, help="Write a publication bundle for one selected candidate")
     args = parser.parse_args()
     conditions = CONDITIONS if args.condition == "both" else (CONDITIONS[args.condition == "graph"],)
-    if args.prepare_pr and (args.stage != "finish" or args.condition == "both"):
-        parser.error("Draft publication requires finish and exactly one condition")
+    if args.prepare_pr and (args.stage not in ("run", "finish") or args.condition == "both"):
+        parser.error("Draft publication requires run/finish and exactly one condition")
     failed = False
     run = args.run_dir.resolve()
-    if args.stage == "prepare":
+    if args.stage == "run":
+        manifest = json.loads(args.manifest.read_text())
+        if manifest.get("protocol_version", 1) < 7:
+            parser.error("The one-run path requires the discovery protocol (version 7 or later)")
+        if args.skip_tests and not args.pilot:
+            parser.error("Generation without a CPU baseline must be labeled --pilot")
+        prepare(run, args.manifest, args.target_site)
+        if args.skip_tests:
+            write_json(run / "cpu-result.json", {"status": "skipped", "reason": "Generation-only pilot; validation not requested"})
+        elif args.baseline_run:
+            reuse_baseline(run, args.baseline_run.resolve())
+        else:
+            baseline(run, args.cpu_python, args.timeout)
+        platform_evidence.discover(run, args.target_site or os.environ.get("ATTN_METAL_SITE", ""))
+        retrieved = repository_graph.write_retrieval(run)
+        write_json(run / "target-retrieval-result.json", {"status": "pass", "symbols": len(retrieved["nodes"]), "relationships": len(retrieved["edges"]), "limits": retrieved["limits"]})
+        # Pilot artifacts can be reviewed even when baseline validation failed.
+        # Controlled translation retains its own passing-baseline gate.
+        platform_evidence.freeze(run, require_cpu_baseline=not args.pilot)
+    elif args.stage == "prepare":
         prepare(run, args.manifest, args.target_site)
     elif args.stage == "baseline":
         if args.baseline_run:
@@ -538,7 +572,7 @@ def main():
                 write_json(run / condition / "metal-result.json", {"status": "blocked", "error": "Metal interpreter unavailable"})
             else:
                 evaluate(run, condition, args.metal_python, args.timeout)
-    elif args.stage == "finish":
+    if args.stage in ("run", "finish"):
         for condition in conditions:
             directory = run / condition
             report_path = directory / "translation-result.json"
@@ -546,6 +580,7 @@ def main():
                 write_json(report_path, translate(run, condition, args.pilot))
             generation = json.loads(report_path.read_text())
             if generation.get("status") != "pass":
+                summarize(run)
                 raise ValueError("Translation failed; no draft will be prepared")
             platform_evidence.verify_context(run, condition)
             # A changed candidate would make validation unrelated to the saved patch.
@@ -554,10 +589,13 @@ def main():
             if untracked or current != (directory / "translation.patch").read_bytes():
                 raise ValueError("Candidate differs from its saved translation patch")
             validation = "skipped"
+            if args.skip_tests:
+                write_json(directory / "metal-result.json", {"status": "skipped", "reason": "Validation not requested"})
             if not args.skip_tests:
                 if not Path(args.metal_python).is_file():
-                    raise ValueError("Metal interpreter required; use --skip-tests to skip validation explicitly")
-                evaluate(run, condition, args.metal_python, args.timeout)
+                    write_json(directory / "metal-result.json", {"status": "blocked", "error": "Metal interpreter unavailable"})
+                else:
+                    evaluate(run, condition, args.metal_python, args.timeout)
                 summary = summarize(run)
                 validation = summary["conditions"][condition]["comparison"]["status"]
                 failed = failed or validation != "pass"
