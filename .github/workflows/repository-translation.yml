@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       stage:
-        description: run prepares, generates and packages in one job; other stages resume a run
+        description: Use run on GitHub; separate stages are for local act
         type: choice
         options: [run, prepare, discover, retrieve, freeze, translate, evaluate, summary, finish]
         default: run
@@ -69,10 +69,45 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  hosted-setup-check:
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare the same tools and library sources as a hosted translation
+        run: .github/scripts/translation/setup-hosted.sh
+      - name: Verify preparation and both frozen contexts without model usage
+        shell: bash
+        run: |
+          set -euo pipefail
+          for stage in prepare discover retrieve freeze; do
+            "$TRANSLATION_PYTHON" .github/scripts/translation/run.py --stage "$stage" --run-dir "$RUNNER_TEMP/hosted-preparation" --target-site "$TRANSLATION_TARGET_SITE"
+          done
+      - name: Upload hosted setup evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: translation-hosted-setup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/translation-hosted/bootstrap/environment.json
+            ${{ runner.temp }}/translation-hosted/bootstrap/sources/source-provenance.json
+            ${{ runner.temp }}/hosted-preparation/protocol.json
+            ${{ runner.temp }}/hosted-preparation/results.json
+          if-no-files-found: error
+          retention-days: 7
+
   experiment:
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    # Current repository default targets Apple Silicon; no inference runs unless a validator is selected.
-    runs-on: [self-hosted, macOS, ARM64]
+    # Generation reads target sources and does not need target hardware.
+    runs-on: ubuntu-latest
     timeout-minutes: 40
     outputs:
       bundle_ready: ${{ steps.bundle.outputs.ready }}
@@ -84,8 +119,37 @@ jobs:
         with:
           fetch-depth: 0
           clean: false
+      - uses: actions/setup-python@v5
+        if: ${{ !env.ACT }}
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        if: ${{ !env.ACT }}
+        with:
+          node-version: '22'
+      - name: Check hosted configuration
+        if: ${{ !env.ACT }}
+        shell: bash
+        env:
+          TRANSLATION_STAGE: ${{ inputs.stage }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
+          WANDB_ENTITY: ${{ vars.TRANSLATION_WANDB_ENTITY }}
+          WANDB_PROJECT: ${{ vars.TRANSLATION_WANDB_PROJECT }}
+        run: |
+          set -euo pipefail
+          [[ "$TRANSLATION_STAGE" == "run" ]] || { echo '::error::Hosted runners are fresh machines. Use stage=run; separate stages are for local act.'; exit 1; }
+          [[ -n "$COPILOT_GITHUB_TOKEN" ]] || { echo '::error::Add repository Actions secret COPILOT_GITHUB_TOKEN.'; exit 1; }
+          [[ -n "$WANDB_API_KEY" ]] || { echo '::error::Add repository Actions secret WANDB_API_KEY for required trial logging.'; exit 1; }
+          [[ -n "$WANDB_ENTITY" && -n "$WANDB_PROJECT" ]] || { echo '::error::Set TRANSLATION_WANDB_ENTITY and TRANSLATION_WANDB_PROJECT repository variables.'; exit 1; }
+      - name: Prepare hosted tools and target source context
+        if: ${{ !env.ACT }}
+        shell: bash
+        env:
+          TRANSLATION_MANIFEST: ${{ inputs.manifest }}
+        run: .github/scripts/translation/setup-hosted.sh
       - name: Prepare isolated tracking tools
-        if: ${{ inputs.stage == 'run' || inputs.stage == 'translate' || inputs.stage == 'finish' || inputs.stage == 'evaluate' || inputs.stage == 'summary' }}
+        if: ${{ env.ACT && (inputs.stage == 'run' || inputs.stage == 'translate' || inputs.stage == 'finish' || inputs.stage == 'evaluate' || inputs.stage == 'summary') }}
         shell: bash
         env:
           TRANSLATION_LOCAL_REPO: ${{ vars.TRANSLATION_LOCAL_REPO }}
@@ -106,10 +170,10 @@ jobs:
           TRANSLATION_STAGE: ${{ inputs.stage }}
           TRANSLATION_REQUESTED_RUN_DIR: ${{ inputs.run_dir }}
           TRANSLATION_PILOT: ${{ inputs.pilot }}
-          TRANSLATION_TARGET_SITE: ${{ vars.TRANSLATION_TARGET_SITE }}
+          LOCAL_TARGET_SITE: ${{ vars.TRANSLATION_TARGET_SITE }}
           TRANSLATION_LOCAL_REPO: ${{ vars.TRANSLATION_LOCAL_REPO }}
-          TRANSLATION_COPILOT_BIN: ${{ vars.TRANSLATION_COPILOT_BIN }}
-          TRANSLATION_COPILOT_HOME: ${{ vars.TRANSLATION_COPILOT_HOME }}
+          LOCAL_COPILOT_BIN: ${{ vars.TRANSLATION_COPILOT_BIN }}
+          LOCAL_COPILOT_HOME: ${{ vars.TRANSLATION_COPILOT_HOME }}
           TRANSLATION_SOURCE_PYTHON: ${{ vars.TRANSLATION_SOURCE_PYTHON }}
           TRANSLATION_TARGET_PYTHON: ${{ vars.TRANSLATION_TARGET_PYTHON }}
           HF_HUB_CACHE: ${{ vars.TRANSLATION_MODEL_CACHE }}
@@ -120,7 +184,12 @@ jobs:
           WANDB_PROJECT: ${{ vars.TRANSLATION_WANDB_PROJECT }}
         run: |
           set -euo pipefail
-          if [[ "${ACT:-}" == "true" ]]; then cd "$TRANSLATION_LOCAL_REPO"; fi
+          if [[ "${ACT:-}" == "true" ]]; then
+            cd "$TRANSLATION_LOCAL_REPO"
+            export TRANSLATION_TARGET_SITE="$LOCAL_TARGET_SITE"
+            export TRANSLATION_COPILOT_BIN="$LOCAL_COPILOT_BIN"
+            export TRANSLATION_COPILOT_HOME="$LOCAL_COPILOT_HOME"
+          fi
           run_dir="$TRANSLATION_REQUESTED_RUN_DIR"
           if [[ -z "$run_dir" ]]; then
             [[ "$TRANSLATION_STAGE" == "run" ]] || { echo 'A run_dir is required for separate stages'; exit 1; }

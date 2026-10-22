@@ -11,6 +11,9 @@ an example-specific interface. Translation should preserve the repository's own 
 
 ## Inputs and output
 
+GitHub runs generation on **GitHub-hosted Ubuntu**. No registered self-hosted
+runner, local library installation or local filesystem path is required.
+
 After the workflow is on the default branch, choose **Actions → Repository
 Translation → Run workflow**:
 
@@ -22,15 +25,15 @@ Translation → Run workflow**:
 | `validator_profile` | Empty | Optional validator invoked after generation; never a translation input |
 | `create_draft_pr` | Checked | Publish the selected condition's original patch as a draft |
 | `pr_base` | `main` | Draft destination |
-| `run_dir` | Empty | Unique temporary directory for `run`; explicit persistent directory for separate stages |
+| `run_dir` | Empty | Unique directory for hosted `run`; persistent directories are for local stages |
 | `pilot` | Checked | Required for the default Auto-routed model |
 
 Use `condition: both` with `create_draft_pr` unchecked for paired research.
 The default manifest describes vLLM CPU/CUDA → vLLM-Metal on Apple Silicon, but
 contains no Attention Tracker contract or inference settings. Change platform
 names, repository requirements and target packages to use another Python backend.
-The action currently uses a native macOS/ARM64 runner for its default target;
-change the runner labels for other target environments.
+The translating model reads source files; it does not execute the target backend.
+The target platform therefore does not determine the hosted generation machine.
 
 Without a validator, generation does not run inference or require a CPU baseline.
 The draft records validation as **skipped**. A selected validator may pass, fail
@@ -105,42 +108,56 @@ even when the source revision contains them. Excluded paths are
 Thus optional test code cannot leak in through repository inspection or source graphs.
 Only the explicitly selected validator profile is copied for post-generation testing.
 
-## Dependencies and tracking
+## Hosted setup and tracking
 
-Generation uses Python 3.12+, Git, GitHub Copilot CLI **1.0.97**, and declared target
-library **source files**. The graph extractor supports Python source. The shared
-runner, graph extraction, artifact packaging and publication use the standard
-library. The only installed tool dependency is the pinned W&B SDK from
-`requirements-tracking.txt`, in a temporary environment. Inference dependencies
-belong to the optional validator's existing environments; the action does not
-install or upgrade application/CPU/Metal packages.
+The action sets up Python 3.12 and Node 22, installs the manifest's exact Copilot CLI
+version and the pinned W&B SDK in a temporary tools environment. It downloads the
+manifest's `target_sources` archives, verifies their SHA-256 hashes, and extracts
+only the declared packages' Python files. Source archives may be a repository tarball
+or a wheel from another platform; their native binaries are neither installed nor
+loaded. Provenance records are saved with the run artifacts. No inference stack,
+model weights or Mac-specific runtime is installed for generation.
 
-Configure these repository variables:
+The setup is shared with a GitHub-hosted PR check, which actually downloads the
+sources, installs/checks Copilot and freezes both graph contexts without model use.
+The Python source graph extractor and artifact/publication code use the standard
+library. Changing source pins changes the experiment inputs and their recorded hashes.
 
-| Variable | Purpose |
-| --- | --- |
-| `TRANSLATION_TARGET_SITE` | Source directory containing the declared target packages |
-| `TRANSLATION_COPILOT_BIN` | Full path to Copilot CLI 1.0.97 |
-| `TRANSLATION_WANDB_ENTITY` | W&B team/account; existing trials use `tm8ctgzqj8-georgia-institute-of-technology` |
-| `TRANSLATION_WANDB_PROJECT` | `vllm-hook-translation-trials` |
-| `TRANSLATION_COPILOT_HOME` | Optional existing Copilot login directory |
+Configure these Actions repository settings:
 
-Set repository secrets `COPILOT_GITHUB_TOKEN` and `WANDB_API_KEY`. Every real
-translating condition gets a dedicated W&B record before model use. A pair shares
-a group. Record source/context/prompt hashes, platform requirements, translator,
-timing and generation/validation outcomes. No example fixture settings are required
-by tracking. Code, full prompts, raw logs and machine metadata are not uploaded to
-W&B; complete evidence stays in Actions artifacts. Missing tracking configuration
-stops model usage.
+| Setting | Type | Purpose |
+| --- | --- | --- |
+| `COPILOT_GITHUB_TOKEN` | Secret | Copilot authentication |
+| `WANDB_API_KEY` | Secret | Required W&B trial logging |
+| `TRANSLATION_WANDB_ENTITY` | Variable | W&B team/account |
+| `TRANSLATION_WANDB_PROJECT` | Variable | Translation trial project |
+
+The workflow checks these settings before model usage. The existing project is
+`tm8ctgzqj8-georgia-institute-of-technology/vllm-hook-translation-trials`.
+Each real translating condition gets a dedicated W&B record before execution; a
+pair shares a group. Records contain hashes, platform requirements, model, timings
+and outcomes. Full code, prompts, raw logs and machine metadata are not uploaded
+to W&B; full evidence stays in Actions artifacts.
 
 Enable **Settings → Actions → General → Allow GitHub Actions to create and approve
 pull requests**. Only the Ubuntu publishing job gets write permissions. Generation
 has read permission and model tools cannot publish.
 
+Use `stage: run` on GitHub: every hosted job is a fresh machine. Separate stages are
+for local `act`, not for resuming a previous hosted machine's temporary directory.
+A job already queued using the old self-hosted labels retains that old definition;
+after merging this fix, cancel it and dispatch a fresh run.
+
+Optional validators need their own runtimes. The provided Metal validator is not
+provisioned on the Ubuntu generation runner; choosing it there reports blocked
+while still permitting a labeled draft. Use native local `act` for actual Metal
+validation, or supply a validator that can run on the hosted machine.
+
 ## Local act execution
 
-The local launcher runs this same generic workflow on the native host and disables
-remote publication:
+For local execution only, install `act`, Python 3.12+, the pinned Copilot CLI and
+target-library source files. The launcher maps the Ubuntu job to the native host,
+skips hosted bootstrap, and disables remote publication:
 
 ```bash
 export TRANSLATION_TARGET_SITE=/path/to/target/site-packages
@@ -182,5 +199,5 @@ PR CI uploads clearly labeled offline fixture bundles for both modes. These chec
 call no model, run no inference and create no research experiments.
 
 Real authenticated draft publication and model generation remain a manual action
-test after runner setup and merge. GitHub requires a manually dispatched workflow
+test after merge and Actions secret configuration. GitHub requires a manually dispatched workflow
 to exist on the default branch: [GitHub documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).

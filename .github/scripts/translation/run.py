@@ -109,7 +109,7 @@ def prepare(run, manifest_path, target_site=None):
         raise ValueError(f"Run directory already exists; select a new run ID: {run}")
     manifest = json.loads(manifest_path.read_text())
     allowed = {"schema_version", "source_repository", "source_revision", "translator", "translation_task",
-               "target_packages", "target_environment", "platform_notes", "graph_input"}
+               "target_packages", "target_sources", "target_environment", "platform_notes", "graph_input"}
     if set(manifest) - allowed or manifest.get("schema_version") != 1:
         raise ValueError("Use the generic manifest; example settings and validation profiles are separate")
     task = manifest["translation_task"]

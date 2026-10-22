@@ -53,6 +53,8 @@ def discover(run, site):
     if not files:
         raise ValueError('No Python source found in declared target packages')
     save(destination / 'index.json', {'files': files, 'packages': packages})
+    if (site / 'source-provenance.json').is_file():
+        shutil.copyfile(site / 'source-provenance.json', run / 'target-source-provenance.json')
 
 
 def verify_discovery(run):

@@ -47,5 +47,25 @@
     ],
     "representation": "Python definitions, lexical calls, class membership and source-linked syntax facts",
     "hand_selected_example_seeds": false
-  }
+  },
+  "target_sources": [
+    {
+      "package": "vllm_metal",
+      "url": "https://codeload.github.com/vllm-project/vllm-metal/tar.gz/ef776cacac8f8a4219e5e23fc0b50fa72d37d22c",
+      "sha256": "42c4b9ac9ba87563eb51d9001c0215e7c59331334a95583922c65ee05c34f54a",
+      "root": "vllm-metal-ef776cacac8f8a4219e5e23fc0b50fa72d37d22c/vllm_metal"
+    },
+    {
+      "package": "mlx_lm",
+      "url": "https://files.pythonhosted.org/packages/84/94/9a38d6b0c6fcca995b9136c94eb7da1e9c5165652edf228b96b29960fa7a/mlx_lm-0.31.3.tar.gz",
+      "sha256": "61eb0e3ba09444f77f874aff295401d7ccd20b39495cbbce0c782a15474ce733",
+      "root": "mlx_lm-0.31.3/mlx_lm"
+    },
+    {
+      "package": "mlx",
+      "url": "https://files.pythonhosted.org/packages/c3/47/5f33906cb03d6a378a697cd2d2641a26b37dea17ee3d9124d7e39e8eca01/mlx-0.31.2-cp312-cp312-macosx_14_0_arm64.whl",
+      "sha256": "e5067aaf2be1f3d7bba5be52348775804f111173c1ed04639618fd713b1a530f",
+      "root": "mlx"
+    }
+  ]
 }
