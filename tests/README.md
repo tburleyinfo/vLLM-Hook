@@ -3,6 +3,10 @@
 Model compatibility tests for the `mia` package. They validate that hooks, workers and
 analyzers work correctly with vLLM models.
 
+> These use-case tests exercise the original PyTorch runner and CUDA capture/steering paths. They
+> are not Metal tests and are not expected to pass with `VLLM_PLUGINS=metal`. No Metal-specific
+> instrumentation test suite is included because capture and steering are unsupported on Metal.
+
 ## Layout
 
 ```

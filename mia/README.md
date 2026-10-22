@@ -11,12 +11,26 @@ Capture and steer vLLM model internals, then analyze what was captured.
 
 ## Overview
 
-`mia` exposes two entry points:
+`mia` preserves two public entry points:
 
 | Entry point | Defined in | Mode | Description |
 |---|---|---|---|
-| `MiaLLM` | `llm.py` | Offline | Wraps `vllm.LLM`; arms capture or steering and runs analyzers. |
-| `MiaClient` | `client.py` | Served | OpenAI-compatible client for `vllm serve`; probe capture and analysis. |
+| `MiaLLM` | `llm.py` | Offline | Wraps `vllm.LLM`; generation-only on Metal. The original PyTorch runner supports capture/steering. |
+| `MiaClient` | `client.py` | Served | OpenAI-compatible client for `vllm serve`; MIA probes require the original MIA server plugin. |
+
+## Metal backend status
+
+With `VLLM_PLUGINS=metal`, `MiaLLM(model=...)` delegates generation to `vllm.LLM` and the
+vLLM-Metal engine; it does not call `mlx_lm.generate` or generate outside vLLM. Supplying a MIA
+`worker_name` raises `MiaConfigurationError`: the Metal runner executes MLX model objects through
+its own v1 runner and does not provide the PyTorch runner APIs used by MIA instrumentation.
+The lightweight `mia.plugin` entry point avoids importing or patching the PyTorch-runner plugin
+when Metal is selected, even if both plugins are listed in `VLLM_PLUGINS`.
+
+Hidden-state and Q/K capture, activation steering, CUDA-graph capture/apertures, MIA artifact
+delivery and analysis of newly generated probes, tensor-parallel capture merging, and MIA server
+instrumentation are not supported on Metal. Existing public types and stored-data readers remain in
+place, but those features are not claimed to work against Metal generation.
 
 ## Directory Structure
 
@@ -94,7 +108,7 @@ The engine. Its own modules are listed first, followed by its four subpackages.
 
 | Module | Role |
 |---|---|
-| `runner.py` | Adapter isolating every vLLM V2 model-runner access. |
+| `runner.py` | Adapter isolating every vLLM V2 PyTorch model-runner access. |
 | `_plugin.py` | vLLM plugin entry point: patches engine, runner and serve path. Registered in `setup.py` as `mia.core._plugin:register`. |
 
 #### `core/hooks/`

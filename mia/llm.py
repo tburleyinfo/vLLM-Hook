@@ -15,6 +15,13 @@ from mia.artifacts import dispatch_disk_analyze
 from mia._profiler import PROF
 from mia.workers.steer_worker import resolve_steer_modes
 from mia.core.delivery.artifact_quant import dequantize_cache_inplace
+from mia.errors import MiaConfigurationError
+
+
+def _metal_plugin_selected() -> bool:
+    """Whether vLLM was explicitly configured to load its Metal plugin."""
+    plugins = os.environ.get("VLLM_PLUGINS", "")
+    return "metal" in {name.strip().lower() for name in plugins.split(",")}
 
 
 def _merge_probes(all_probes: list) -> dict:
@@ -80,13 +87,14 @@ class MiaLLM:
         Args:
             model: model name or path, as for ``vllm.LLM``.
             worker_name: "capture_hs", "capture_qk" or "steer"; None runs no MIA worker.
+                MIA workers are not supported when VLLM_PLUGINS selects Metal.
             analyzer_name: a registered analyzer for ``analyze()``; None for none.
             config_file: JSON with the worker's settings (heads, Q/K mode, steering, HS layers).
             download_dir: model download dir; also the root of the default ``hook_dir``.
             enable_hook: default for ``generate(use_hook=...)``.
             hook_dir: dir for ``save_to_disk`` runs; default ``<download_dir>/mia``, else
                 ``~/.cache/mia``.
-            enforce_eager: run eagerly instead of with CUDA graphs.
+            enforce_eager: passed through to vLLM; CUDA graph control applies to PyTorch backends.
             **vllm_kwargs: passed to ``vllm.LLM``.
         """
         self.model_name = model
@@ -94,6 +102,19 @@ class MiaLLM:
         self.analyzer_name = analyzer_name
         self.enable_hook = enable_hook
         self.enforce_eager = enforce_eager
+
+        if _metal_plugin_selected() and worker_name in {
+            "capture_hs",
+            "capture_qk",
+            "steer",
+        }:
+            raise MiaConfigurationError(
+                f"MIA worker {worker_name!r} cannot run with VLLM_PLUGINS=metal. "
+                "MIA capture and steering require torch.nn module hooks, the vLLM "
+                "GPU/CPU V2 runner, and CUDA graph/custom-op support; vLLM-Metal "
+                "executes MLX models through its own v1 runner. Generation without "
+                "a MIA worker remains available through MiaLLM."
+            )
 
         if download_dir is not None:
             download_dir = os.path.expanduser(download_dir)
@@ -120,7 +141,11 @@ class MiaLLM:
         # Unknown names are refused before the engine is built.
         worker = analyzer_entry = None
         if worker_name or analyzer_name:
-            vllm.plugins.load_general_plugins()
+            if _metal_plugin_selected():
+                from mia import register_plugins
+                register_plugins()
+            else:
+                vllm.plugins.load_general_plugins()
         if worker_name:
             worker_entry = PluginRegistry.get_worker(worker_name)
             if worker_entry is None:
@@ -136,15 +161,23 @@ class MiaLLM:
         llm_kwargs = dict(vllm_kwargs)
         if download_dir is not None:
             llm_kwargs['download_dir'] = download_dir
-        # lazy: keep mia.core._plugin and mia.core.hooks out of import mia
-        from mia.core._plugin import engine_hints
-        with engine_hints(qk_score=self._qk_capture == "score"):
+        if _metal_plugin_selected():
             self.llm = LLM(
                 model=model,
                 worker_extension_cls=worker,
                 enforce_eager=enforce_eager,
                 **llm_kwargs,
             )
+        else:
+            # lazy: keep mia.core._plugin and mia.core.hooks out of import mia
+            from mia.core._plugin import engine_hints
+            with engine_hints(qk_score=self._qk_capture == "score"):
+                self.llm = LLM(
+                    model=model,
+                    worker_extension_cls=worker,
+                    enforce_eager=enforce_eager,
+                    **llm_kwargs,
+                )
 
         self.tokenizer = self.llm.get_tokenizer()
         self.llm_engine = self.llm.llm_engine
@@ -409,4 +442,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-
