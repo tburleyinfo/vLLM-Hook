@@ -27,17 +27,19 @@ def generate_fixture(run, condition, pilot):
 
 def smoke(output):
     output.mkdir(parents=True, exist_ok=False)
-    site = output / 'site/mlx_lm'
+    site = output / 'site/library_runtime'
     site.mkdir(parents=True)
     (site / 'fixture.py').write_text('def caller(value):\n    return callee(value)\ndef callee(value):\n    return value\n')
-    for label, condition in [('no-graph', 'source_only'), ('graph', 'source_validated_dag')]:
+    manifest = json.loads((runner.PROFILE / 'manifest.json').read_text())
+    manifest.update(target_packages=['library_runtime'], platform_notes=[])
+    runner.write_json(output / 'manifest.json', manifest)
+    for label, condition in [('no-graph', 'no_graph'), ('graph', 'graph')]:
         root = output / label
         run, bundle = root / 'run', root / 'bundle'
         argv = ['run.py', '--stage', 'run', '--condition', label, '--run-dir', str(run),
-                '--target-site', str(output / 'site'), '--pilot', '--skip-tests', '--prepare-pr', str(bundle)]
+                '--target-site', str(output / 'site'), '--manifest', str(output / 'manifest.json'), '--pilot', '--prepare-pr', str(bundle)]
         with patch('sys.argv', argv), patch.object(runner, 'translate', side_effect=generate_fixture), \
-                patch.object(runner, 'baseline', side_effect=AssertionError('Generation-only must not run CPU inference')), \
-                patch.object(runner, 'evaluate', side_effect=AssertionError('Generation-only must not run Metal inference')):
+                patch.object(runner, 'evaluate', side_effect=AssertionError('No validator selected')):
             runner.main()
         metadata = json.loads((bundle / 'metadata.json').read_text())
         assert metadata['condition'] == label and metadata['validation'] == 'skipped'

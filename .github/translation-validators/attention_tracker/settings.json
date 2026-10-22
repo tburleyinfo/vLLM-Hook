@@ -1,37 +1,4 @@
 {
-  "tickets": [
-    "MLR-15",
-    "MLR-40",
-    "MLR-7",
-    "MLR-50",
-    "MLR-53"
-  ],
-  "source_repository": "https://github.com/IBM/vLLM-Hook.git",
-  "source_revision": "3c4f6874cd007ca39fd76c40b8c481b573798cf3",
-  "conditions": [
-    "source_only",
-    "source_validated_dag"
-  ],
-  "translator": {
-    "provider": "github_copilot",
-    "cli_version": "1.0.97",
-    "model": "auto",
-    "fixed_model": false,
-    "effort": "provider_default",
-    "tools": [
-      "apply_patch",
-      "create",
-      "edit",
-      "view",
-      "grep",
-      "glob"
-    ],
-    "timeout_seconds": 900
-  },
-  "graph_review": {
-    "status": "pending",
-    "reviewer": null
-  },
   "fixture": {
     "model": "Qwen/Qwen2.5-3B-Instruct",
     "model_revision": "aa8e72537993ba99e69dfaafa59ed015b17504d1",
@@ -62,12 +29,6 @@
     "atol": 0.0001,
     "rtol": 0.001
   },
-  "later_conditions": [
-    "source_and_target_context_dag",
-    "deterministic_cpg",
-    "llm_generated_dag"
-  ],
-  "protocol_version": 4,
   "target_environment": {
     "VLLM_ENABLE_V1_MULTIPROCESSING": "0",
     "VLLM_METAL_USE_PAGED_ATTENTION": "0",

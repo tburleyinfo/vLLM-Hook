@@ -321,10 +321,11 @@ Full detail: [`mia/README.md`](mia/README.md).
 
 ## Repository translation workflow
 
-Generate an Attention Tracker Metal candidate with or without supplied dependency
-graphs, save its artifacts and open a draft pull request. Validation is optional
-while reviewing the generated port. See the [workflow setup and review instructions](.github/translation/README.md)
-for action inputs, runner dependencies, W&B tracking and offline packaging checks.
+Translate the repository between declared backends with or without supplied
+source and target dependency graphs, save artifacts and open a draft pull request.
+Example-specific validation is optional and runs only after generation, outside
+the translator's inputs. See the [workflow setup and review instructions](.github/translation/README.md)
+for action inputs, local `act` usage, runner dependencies and W&B tracking.
 
 ## 🤝 Contributing
 

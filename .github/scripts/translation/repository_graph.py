@@ -3,7 +3,6 @@ import ast
 import hashlib
 import json
 from pathlib import Path
-import re
 
 
 def sha(path):
@@ -22,8 +21,6 @@ def build(root, scope="target"):
             continue
         if not path.resolve().is_relative_to(root.resolve()):
             raise ValueError('Graph source escapes selected corpus')
-        if scope == 'target' and relative.split('/')[0] not in ('mlx', 'mlx_lm', 'vllm_metal'):
-            raise ValueError('Graph corpus must contain target-library code only')
         source = path.read_text()
         tree = ast.parse(source, filename=relative)
         module = relative[:-3].replace('/', '.')
@@ -96,92 +93,28 @@ def build(root, scope="target"):
             'scope': scope, 'files': files, 'nodes': list(nodes.values()),
             'edges': sorted({json.dumps(e, sort_keys=True) for e in edges}),
             'unresolved_calls': unresolved, 'structural_facts': structural_facts,
-            'limits': 'Not a full CPG. No dataflow, runtime dispatch, re-export or alias inference. No claim of hook correctness.'}
+            'limits': 'Not a full CPG. No dataflow, runtime dispatch, re-export or alias inference. No runtime-behavior equivalence claim.'}
 
 
 def decode_edges(graph):
     return [json.loads(e) if isinstance(e, str) else e for e in graph['edges']]
 
 
-def retrieve(graph, query, seed_limit=1, depth=2, node_limit=30):
-    words = set(re.findall(r'[a-z]+', query.lower()))
-    stop = {'the', 'a', 'to', 'and', 'how', 'in', 'of', 'use'}
-    words -= stop
-    if not words:
-        raise ValueError('Provide a nonempty retrieval query')
-    nodes = {n['id']: n for n in graph['nodes']}
-    def score(node):
-        # Symbol names are deliberately weighted above generic prose.
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', node['name']).lower()
-        return sum(4 for word in words if word in text) + sum(1 for word in words if word in node['doc'].lower())
-    ranked = sorted(nodes, key=lambda key: (-score(nodes[key]), key))
-    seeds = [key for key in ranked if score(nodes[key]) > 0][:seed_limit]
-    edges = decode_edges(graph)
-    selected, frontier = set(seeds), set(seeds)
-    for _ in range(depth):
-        candidates = set()
-        for edge in edges:
-            if edge['from'] in frontier:
-                candidates.add(edge['to'])
-            if edge['to'] in frontier:
-                candidates.add(edge['from'])
-        frontier = set(sorted(candidates - selected, key=lambda key: (-score(nodes[key]), key))[:max(0, node_limit - len(selected))])
-        selected.update(frontier)
-    return {'query': query, 'seeds': seeds, 'depth': depth, 'node_limit': node_limit,
-            'nodes': [nodes[key] for key in sorted(selected)],
-            'edges': [e for e in edges if e['from'] in selected and e['to'] in selected],
-            'limits': graph['limits']}
-
-
 def write_retrieval(run):
     run = Path(run)
-    destination = run / 'target-retrieval'
-    if destination.exists():
-        raise ValueError('Retrieval already exists; prepare a new run')
-    manifest = json.loads((run / 'manifest.json').read_text())
-    if manifest.get('protocol_version', 1) >= 6:
-        return write_unseeded(run)
-    query = manifest['retrieval']['query']
-    root = run / 'platform-discovery/source'
-    graph = build(root)
-    result = retrieve(graph, query, **{key: manifest["retrieval"][key] for key in ("seed_limit", "depth", "node_limit") if key in manifest["retrieval"]})
-    if not result['seeds']:
-        raise ValueError('No target-library symbols match the query')
-    destination.mkdir()
-    (destination / 'graph.json').write_text(json.dumps(graph, indent=2) + '\n')
-    (destination / 'retrieval.json').write_text(json.dumps(result, indent=2) + '\n')
-    # Edges/locations only: both conditions already receive the identical full corpus.
-    lines = ['# Target-library search relationships', '', 'Query: ' + query,
-             '', graph['limits'], '', '```mermaid', 'flowchart TD']
-    ids = {n['id']: 'n' + str(i) for i, n in enumerate(result['nodes'])}
-    for node in result['nodes']:
-        label = (node['id'] + ' ' + node['file'] + ':' + str(node['line'])).replace('"', "'")
-        lines.append(f'  {ids[node["id"]]}["{label}"]')
-    for edge in result['edges']:
-        lines.append(f'  {ids[edge["from"]]} -->|{edge["kind"]}| {ids[edge["to"]]}')
-    lines += ['```', '', '## Source locations', '']
-    lines += [f'- {n["id"]}: platform_reference/source/{n["file"]}:{n["line"]}-{n["end_line"]}' for n in result['nodes']]
-    (destination / 'relationships.md').write_text('\n'.join(lines) + '\n')
-    result['corpus_sha256'] = graph['files']
-    return result
+    if (run / 'target-retrieval').exists():
+        raise ValueError('Graphs already exist; prepare a new run')
+    return write_unseeded(run)
 
 
 def verify(run):
     run = Path(run)
-    graph = json.loads((run / 'target-retrieval/graph.json').read_text())
-    actual = {p.relative_to(run / 'platform-discovery/source').as_posix(): sha(p)
-              for p in sorted((run / 'platform-discovery/source').rglob('*.py'))}
-    if actual != graph['files']:
-        raise ValueError('Graph corpus changed after retrieval')
-    manifest = json.loads((run / 'manifest.json').read_text())
-    if manifest.get('protocol_version', 1) >= 7:
-        source = json.loads((run / 'target-retrieval/source/graph.json').read_text())
-        actual_source = {p.relative_to(run / 'source').as_posix(): sha(p)
-                         for p in sorted((run / 'source').rglob('*.py'))
-                         if not any(part in ('.git', '__pycache__', '.venv') for part in p.relative_to(run / 'source').parts)}
-        if actual_source != source['files']:
-            raise ValueError('Source graph corpus changed after extraction')
-    return graph
+    for relative, corpus in [('graph.json', run / 'platform-discovery/source'), ('source/graph.json', run / 'source')]:
+        graph = json.loads((run / 'target-retrieval' / relative).read_text())
+        actual = {p.relative_to(corpus).as_posix(): sha(p) for p in sorted(corpus.rglob('*.py'))
+                  if not any(part in ('.git', '__pycache__', '.venv') for part in p.relative_to(corpus).parts)}
+        if actual != graph['files']:
+            raise ValueError('Graph corpus changed after extraction')
 
 
 def write_graph_bundle(root, destination, scope):
@@ -212,16 +145,13 @@ def write_graph_bundle(root, destination, scope):
 def write_unseeded(run):
     destination = run / 'target-retrieval'
     graph = write_graph_bundle(run / 'platform-discovery/source', destination, 'target')
-    manifest = json.loads((run / 'manifest.json').read_text())
-    source = None
-    if manifest.get('protocol_version', 1) >= 7:
-        source = write_graph_bundle(run / 'source', destination / 'source', 'source')
-        readme = destination / 'relationships.md'
-        readme.write_text(readme.read_text() + '\nSource repository graph: source/relationships.md and source/files/.\n'
-            'Derive any example-specific dependency slices or implementation plans yourself.\n')
-    result = {'query': 'all library symbols; unseeded' if source is None else 'all source and target symbols; unseeded',
-              'nodes': graph['nodes'] + (source['nodes'] if source else []),
-              'edges': decode_edges(graph) + (decode_edges(source) if source else []),
+    source = write_graph_bundle(run / 'source', destination / 'source', 'source')
+    readme = destination / 'relationships.md'
+    readme.write_text(readme.read_text() + '\nSource repository graph: source/relationships.md and source/files/.\n'
+        'Derive relevant dependency slices yourself.\n')
+    result = {'query': 'all source and target symbols; unseeded',
+              'nodes': graph['nodes'] + source['nodes'],
+              'edges': decode_edges(graph) + decode_edges(source),
               'limits': graph['limits'], 'corpus_sha256': graph['files']}
     (destination / 'retrieval.json').write_text(json.dumps({'query': result['query'], 'symbols': len(result['nodes']), 'relationships': len(result['edges'])}) + '\n')
     return result

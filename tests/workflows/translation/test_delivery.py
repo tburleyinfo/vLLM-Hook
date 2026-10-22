@@ -17,7 +17,7 @@ class DeliveryTests(unittest.TestCase):
     def test_bundle_contains_one_original_patch(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
-            for condition, content in [('source_only', b'ordinary'), ('source_validated_dag', b'graph')]:
+            for condition, content in [('no_graph', b'ordinary'), ('graph', b'graph')]:
                 directory = root / condition
                 directory.mkdir()
                 (directory / 'translation.patch').write_bytes(content)
@@ -25,13 +25,13 @@ class DeliveryTests(unittest.TestCase):
             (root / 'protocol.json').write_text('{}')
             (root / 'manifest.json').write_text(json.dumps({'source_revision': 'a' * 40}))
             bundle = root / 'bundle'
-            delivery.prepare(root, 'source_only', 'skipped', bundle)
+            delivery.prepare(root, 'no_graph', 'skipped', bundle)
             self.assertEqual((bundle / 'candidate.patch').read_bytes(), b'ordinary')
             self.assertEqual(set(p.name for p in bundle.iterdir()), {'candidate.patch', 'metadata.json', 'body.md'})
             self.assertIn('**skipped**', (bundle / 'body.md').read_text())
-            (root / 'source_only/translation.patch').write_bytes(b'tampered')
+            (root / 'no_graph/translation.patch').write_bytes(b'tampered')
             with self.assertRaises(ValueError):
-                delivery.prepare(root, 'source_only', 'pass', bundle)
+                delivery.prepare(root, 'no_graph', 'pass', bundle)
 
     def test_publish_uses_separate_index_and_one_patch(self):
         with tempfile.TemporaryDirectory() as root:
@@ -98,50 +98,6 @@ class DeliveryTests(unittest.TestCase):
             with patch.object(delivery, 'command', side_effect=fake), self.assertRaises(ValueError):
                 delivery.publish(bundle, 'example/project', 'main', repo)
             self.assertFalse(pushed)
-
-
-class FinishTests(unittest.TestCase):
-    def test_optional_tests_and_single_condition(self):
-        import run as runner
-        for skip in (True, False):
-            with self.subTest(skip=skip), tempfile.TemporaryDirectory() as temporary:
-                run = Path(temporary)
-                directory = run / 'source_only'
-                directory.mkdir()
-                (directory / 'translation-result.json').write_text(json.dumps({'status': 'pass', 'patch_sha256': 'saved'}))
-                (directory / 'translation.patch').write_bytes(b'original patch')
-                args = ['run.py', '--stage', 'finish', '--condition', 'no-graph', '--run-dir', str(run),
-                        '--metal-python', __import__('sys').executable, '--prepare-pr', str(run / 'bundle')]
-                if skip:
-                    args.append('--skip-tests')
-                summary = {'conditions': {'source_only': {'comparison': {'status': 'fail'}}}}
-                with patch('sys.argv', args), patch.object(runner.platform_evidence, 'verify_context'), \
-                     patch.object(runner, 'git', side_effect=[b'original patch', b'']), \
-                     patch.object(runner, 'evaluate') as evaluate, \
-                     patch.object(runner, 'summarize', return_value=summary), \
-                     patch.object(runner.publish_candidate, 'prepare') as prepare:
-                    if skip:
-                        runner.main()
-                        evaluate.assert_not_called()
-                    else:
-                        with self.assertRaises(SystemExit):
-                            runner.main()
-                        evaluate.assert_called_once()
-                    self.assertEqual(prepare.call_args.args[1], 'source_only')
-                    self.assertEqual(prepare.call_args.args[2], 'skipped' if skip else 'fail')
-
-
-    def test_evaluate_does_not_report_success_for_failed_parity(self):
-        import run as runner
-        import sys
-        with tempfile.TemporaryDirectory() as temporary:
-            args = ['run.py', '--stage', 'evaluate', '--condition', 'no-graph',
-                    '--run-dir', temporary, '--metal-python', sys.executable]
-            summary = {'conditions': {'source_only': {'comparison': {'status': 'fail'}}}}
-            with patch('sys.argv', args), patch.object(runner, 'evaluate'), patch.object(runner, 'summarize', return_value=summary):
-                with self.assertRaises(SystemExit) as caught:
-                    runner.main()
-                self.assertEqual(caught.exception.code, 1)
 
 
 if __name__ == '__main__':

@@ -19,10 +19,12 @@ def register(run, condition):
         console='off', silent=True, root_dir=str(run), program='repository-translation',
         program_relpath='repository-translation', host='runner', username='researcher')
     config = {'condition': condition, 'source_revision': manifest['source_revision'],
-        'protocol_version': protocol['protocol_version'], 'translator': manifest['translator'],
-        'fixture': {k: v for k, v in manifest['fixture'].items() if k != 'prompts'},
-        'tolerance': manifest['tolerance'], 'prompt_sha256': protocol['prompt_sha256'][condition],
-        'evaluator_sha256': protocol['evaluator_sha256'], 'manual_candidate_repairs': False,
+        'schema_version': protocol['schema_version'], 'translator': manifest['translator'],
+        'translation_task': manifest['translation_task'],
+        'target_packages': manifest['target_packages'],
+        'target_environment': manifest.get('target_environment', {}), 'prompt_sha256': protocol['prompt_sha256'][condition],
+        'manifest_sha256': hashlib.sha256((run / 'manifest.json').read_bytes()).hexdigest(),
+        'manual_candidate_repairs': False,
         'shared_context_sha256': hashlib.sha256(json.dumps(protocol['shared_context_files'], sort_keys=True).encode()).hexdigest(),
         'graph_context_sha256': hashlib.sha256(json.dumps(protocol['condition_context_files'][condition], sort_keys=True).encode()).hexdigest()}
     record = wandb.init(entity=entity, project=project,
@@ -47,9 +49,7 @@ def update(run, condition, row):
         'translation_seconds': translation.get('seconds'),
         'translator_resolved': translation.get('resolved_models', []),
         'patch_sha256': translation.get('patch_sha256'),
-        'validation_status': row['metal'].get('status'),
-        'validation_error': row['metal'].get('error'),
-        'comparison_status': row['comparison'].get('status'),
-        'comparison_reason': row['comparison'].get('reason'),
+        'validation_status': row['validation'].get('status'),
+        'validation_error': row['validation'].get('error', row['validation'].get('reason')),
         'manual_candidate_repairs': False})
     remote.summary.update()

@@ -23,16 +23,16 @@ def prepare(run, condition, validation, output):
     manifest = json.loads((run / 'manifest.json').read_text())
     output.mkdir(parents=True, exist_ok=True)
     (output / 'candidate.patch').write_bytes(patch)
-    label = {'source_only': 'no-graph', 'source_validated_dag': 'graph'}[condition]
+    label = {'no_graph': 'no-graph', 'graph': 'graph'}[condition]
     metadata = {'condition': label, 'patch_sha256': sha,
                 'source_revision': manifest['source_revision'], 'validation': validation,
                 'pilot': protocol.get('pilot', True)}
     (output / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
     (output / 'body.md').write_text(
-        f'Translate Attention Tracker to Metal using **{label}**.\n\n'
+        f'Repository translation using **{label}**.\n\n'
         f'Validation: **{validation}**. Skipped validation does not establish parity.\n\n'
         'Only this candidate\'s saved changes are included. Experiment logs and the other candidate are excluded.\n\n'
-        'Notebook cells have not been executed end to end. A passing fixture supports only its tested scope; '
+        'Optional validation establishes only the selected validator’s tested scope; '
         'this pilot does not establish a graph advantage.\n\n'
         f'Source: `{manifest["source_revision"]}`\n\nPatch SHA-256: `{sha}`\n')
 
@@ -64,7 +64,7 @@ def publish(bundle, repo, base, checkout, artifact_url=None):
         if not any(paths) or any(Path(path).parts[0] in protected for path in paths if path):
             raise ValueError('Patch changes workflow infrastructure, supplied evidence or internal discovery artifacts')
         tree = command(['git', 'write-tree'], checkout, env)
-        title = f'Attention Tracker Metal translation ({metadata["condition"]})'
+        title = f'Repository translation ({metadata["condition"]})'
         branch = f'translation/{metadata["condition"]}-{parent[:10]}-{sha[:12]}'
         body_file = Path(temporary) / 'body.md'
         body_file.write_text(body)

@@ -1,10 +1,4 @@
-"""Immutable evaluator: real MIA generation/capture/analyze on CPU or a candidate.
-
-Candidate adapter interface: attention_tracker_metal.MetalAttentionTracker with
-generate_and_capture(prompts, settings) -> (outputs, probes), tokenizer and
-analyze(probes, input_ranges, attn_func). Probes use the MIA qk_cache schema.
-This file runs outside the candidate tree and is never supplied as an editable test.
-"""
+"""Optional native-API validation: source and translated repositories use the same MIA API."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +13,7 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=["cpu", "metal", "metal_source"], required=True)
+    parser.add_argument("--backend", choices=["cpu", "target"], required=True)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -54,36 +48,27 @@ def main():
         report.update(token_ids=token_ids, input_ranges=ranges,
                       tokenizer_sha256=hashlib.sha256(tokenizer.backend_tokenizer.to_str().encode()).hexdigest())
         report["stage"] = "engine"
-        if args.backend in ("cpu", "metal_source"):
-            from vllm import SamplingParams
-            from mia import MiaLLM, register_plugins
-            register_plugins()
-            config = args.output.parent / "capture_config.json"
-            config.write_text(json.dumps({"params": {"important_heads": settings["important_heads"]}, "hookq": {"hookq_mode": settings["hookq_mode"]}}))
-            engine = MiaLLM(model=settings["model"], revision=settings["model_revision"],
-                            tokenizer_revision=settings["model_revision"], worker_name="capture_qk",
-                            analyzer_name="attn_tracker", config_file=str(config),
-                            hook_dir=str(args.output.parent / "hooks"), dtype=settings["dtype"],
-                            max_model_len=settings["max_model_len"], seed=settings["seed"],
-                            max_num_seqs=settings["max_num_seqs"],
-                            max_num_batched_tokens=settings["max_num_batched_tokens"],
-                            kv_cache_memory_bytes=settings["kv_cache_memory_bytes"],
-                            enable_prefix_caching=False, enforce_eager=True, enable_hook=True,
-                            gpu_memory_utilization=0.25)
-            report["stage"] = "generate"
-            outputs = engine.generate(settings["prompts"], SamplingParams(temperature=settings["temperature"], max_tokens=settings["max_tokens"]), use_hook=True)
-            probes = outputs[0].probes
-            report["generate_executed"] = True
-            report["stage"] = "analyze"
-            stats = engine.analyze(analyzer_spec={"input_range": ranges, "attn_func": settings["attn_func"]}, probes=probes)
-        else:
-            from attention_tracker_metal import MetalAttentionTracker
-            engine = MetalAttentionTracker(settings)
-            report["stage"] = "generate"
-            outputs, probes = engine.generate_and_capture(settings["prompts"], settings)
-            report["generate_executed"] = True
-            report["stage"] = "analyze"
-            stats = engine.analyze(probes, ranges, settings["attn_func"])
+        from vllm import SamplingParams
+        from mia import MiaLLM, register_plugins
+        register_plugins()
+        config = args.output.parent / "capture_config.json"
+        config.write_text(json.dumps({"params": {"important_heads": settings["important_heads"]}, "hookq": {"hookq_mode": settings["hookq_mode"]}}))
+        engine = MiaLLM(model=settings["model"], revision=settings["model_revision"],
+                        tokenizer_revision=settings["model_revision"], worker_name="capture_qk",
+                        analyzer_name="attn_tracker", config_file=str(config),
+                        hook_dir=str(args.output.parent / "hooks"), dtype=settings["dtype"],
+                        max_model_len=settings["max_model_len"], seed=settings["seed"],
+                        max_num_seqs=settings["max_num_seqs"],
+                        max_num_batched_tokens=settings["max_num_batched_tokens"],
+                        kv_cache_memory_bytes=settings["kv_cache_memory_bytes"],
+                        enable_prefix_caching=False, enforce_eager=True, enable_hook=True,
+                        gpu_memory_utilization=0.25)
+        report["stage"] = "generate"
+        outputs = engine.generate(settings["prompts"], SamplingParams(temperature=settings["temperature"], max_tokens=settings["max_tokens"]), use_hook=True)
+        probes = outputs[0].probes
+        report["generate_executed"] = True
+        report["stage"] = "analyze"
+        stats = engine.analyze(analyzer_spec={"input_range": ranges, "attn_func": settings["attn_func"]}, probes=probes)
         report["analyze_executed"] = True
         from mia.artifacts import unpack_qk
         captures = []
