@@ -23,7 +23,9 @@
     "target_backend": "vLLM-Metal on Apple Silicon",
     "requirements": [
       "Preserve repository public APIs, observable behavior and lifecycle behavior.",
-      "Use real vLLM generation through vLLM-Metal; do not substitute standalone MLX generation."
+      "Use real vLLM generation through vLLM-Metal; do not substitute standalone MLX generation.",
+      "Implement capture, steering and analysis through the existing public APIs on vLLM-Metal.",
+      "Add Metal support alongside existing CPU/CUDA support. Preserve existing files and dependency profiles; prefer new backend modules and minimal integration edits."
     ]
   },
   "target_packages": [

@@ -41,13 +41,12 @@ or block. A failed/blocked report keeps the action red while still allowing a
 labeled draft. Failed generation, an empty patch or a changed original candidate
 cannot be published as a completed translation. No manual candidate repair occurs.
 
-The draft contains the selected original implementation patch and links to the
-Actions evidence artifact. Reports, model usage, translation prompts, discovery
-artifacts, declared library sources, graphs and notebooks are uploaded separately.
-The saved patch records all changed implementation files regardless of their names.
-Evidence expires after 14 days. Workflow infrastructure and discovery scaffolding
-cannot enter the generated candidate PR. Publication uses a separate Git index,
-checks patch applicability against the selected base and reuses matching drafts.
+The draft contains the selected implementation, usage files, experiment results,
+frozen manifest, protocol, prompt and generated discovery documents. Raw execution
+logs and the original patch remain downloadable for 14 days. Supplied reference
+libraries and graph scaffolding stay outside the candidate PR; their frozen inputs
+are recorded in the protocol. Publication uses a separate Git index, checks patch
+applicability against the selected base and reuses matching drafts.
 
 ## Graph and no-graph boundary
 
@@ -56,7 +55,8 @@ sources, optional general platform notes and repository behavior requirements.
 Only graph mode receives machine-extracted source and target graphs. Graphs use
 all Python files in those corpora, without example-specific queries or seed lists.
 Both modes may derive their own graphs and plans under `translation_discovery/`.
-Those generated outputs are hashed separately and excluded from the delivery patch.
+Those generated outputs are hashed separately and committed as experiment documents,
+separate from the unchanged implementation patch.
 
 The graph records definitions, lexical calls, class membership and source-linked
 syntax facts. It does not prove runtime behavior or provide full data/control-flow
@@ -137,7 +137,7 @@ The workflow checks these settings before model usage. The existing project is
 Each real translating condition gets a dedicated W&B record before execution; a
 pair shares a group. Records contain hashes, platform requirements, model, timings
 and outcomes. Full code, prompts, raw logs and machine metadata are not uploaded
-to W&B; full evidence stays in Actions artifacts.
+to W&B; review evidence is committed in the draft and raw execution logs stay in Actions artifacts.
 
 Enable **Settings → Actions → General → Allow GitHub Actions to create and approve
 pull requests**. Only the Ubuntu publishing job gets write permissions. Generation
@@ -201,3 +201,25 @@ call no model, run no inference and create no research experiments.
 Real authenticated draft publication and model generation remain a manual action
 test after merge and Actions secret configuration. GitHub requires a manually dispatched workflow
 to exist on the default branch: [GitHub documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
+
+## Additive implementation and review files
+
+The task is to implement the target backend through the existing public API. Prefer
+new backend modules, tests and usage files, with small integration edits. Preserve
+existing features, files, dependency profiles and installation paths. For the
+default manifest this includes capture, steering and analysis on Metal alongside
+CPU/CUDA support. Record implemented behavior, usage, checks actually performed
+and remaining work in a new `TRANSLATION.md`; disabling a feature is not implementation.
+
+The publisher rejects deletion or renaming of existing files. This file-preservation
+check does not prove that code edits preserve behavior or dependency settings;
+those still require review and functional validation.
+
+Each draft commits an experiment report and translator-generated discovery files
+under `translation-experiments/<condition>-<patch-sha256>/`. The report records the
+original implementation patch hash, generation result and validation result.
+Implementation, tests and usage notes are ordinary PR files. Downloadable execution
+logs and the original patch are optional raw evidence, not the only copy of the
+review documents. The internal publication bundle is an Actions job handoff.
+The implementation patch remains unchanged; the publisher adds the experiment
+report separately. Failed or skipped validation remains explicit in the draft.

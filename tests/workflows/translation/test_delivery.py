@@ -27,8 +27,9 @@ class DeliveryTests(unittest.TestCase):
             bundle = root / 'bundle'
             delivery.prepare(root, 'no_graph', 'skipped', bundle)
             self.assertEqual((bundle / 'candidate.patch').read_bytes(), b'ordinary')
-            self.assertEqual(set(p.name for p in bundle.iterdir()), {'candidate.patch', 'metadata.json', 'body.md'})
+            self.assertEqual(set(p.name for p in bundle.iterdir()), {'candidate.patch', 'metadata.json', 'body.md', 'review-files'})
             self.assertIn('**skipped**', (bundle / 'body.md').read_text())
+            self.assertEqual(json.loads((bundle / 'review-files/experiment.json').read_text())['validation']['status'], 'skipped')
             (root / 'no_graph/translation.patch').write_bytes(b'tampered')
             with self.assertRaises(ValueError):
                 delivery.prepare(root, 'no_graph', 'pass', bundle)
@@ -61,6 +62,9 @@ class DeliveryTests(unittest.TestCase):
             (bundle / 'candidate.patch').write_bytes(saved)
             (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'patch_sha256': hashlib.sha256(saved).hexdigest()}))
             (bundle / 'body.md').write_text('Validation: skipped')
+            (bundle / 'review-files/discovery').mkdir(parents=True)
+            (bundle / 'review-files/README.md').write_text('Experiment report\n')
+            (bundle / 'review-files/discovery/plan.md').write_text('Generated plan\n')
             actual = delivery.command
             pushed = []
             published_bodies = []
@@ -84,9 +88,22 @@ class DeliveryTests(unittest.TestCase):
             self.assertIn('https://github.com/example/project/actions/runs/1/artifacts/2', published_bodies[0])
             self.assertEqual(git('status', '--porcelain'), before)
             self.assertEqual((repo / '.git/index').read_bytes(), index)
-            self.assertEqual(git('diff-tree', '--no-commit-id', '--name-only', '-r', pushed[0]), 'application.py')
+            changed = git('diff-tree', '--no-commit-id', '--name-only', '-r', pushed[0]).splitlines()
+            self.assertIn('application.py', changed)
+            prefix = 'translation-experiments/graph-' + hashlib.sha256(saved).hexdigest()
+            self.assertEqual(git('show', pushed[0] + ':' + prefix + '/README.md'), 'Experiment report')
+            self.assertEqual(git('show', pushed[0] + ':' + prefix + '/discovery/plan.md'), 'Generated plan')
             self.assertEqual(git('show', pushed[0] + ':application.py'), 'candidate')
             self.assertEqual(git('rev-parse', pushed[0] + '^'), base)
+            # Deleting an existing source file cannot be published.
+            (repo / 'application.py').unlink()
+            removed = subprocess.check_output(['git', 'diff', '--binary', '--', 'application.py'], cwd=repo)
+            (bundle / 'candidate.patch').write_bytes(removed)
+            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'patch_sha256': hashlib.sha256(removed).hexdigest()}))
+            pushed.clear()
+            with patch.object(delivery, 'command', side_effect=fake), self.assertRaisesRegex(ValueError, 'preserve existing files'):
+                delivery.publish(bundle, 'example/project', 'main', repo)
+            self.assertFalse(pushed)
             # A forbidden file is rejected before any push.
             (repo / '.github/workflows').mkdir(parents=True)
             (repo / '.github/workflows/candidate.yml').write_text('bad\n')

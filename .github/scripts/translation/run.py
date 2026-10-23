@@ -136,8 +136,20 @@ Preserve its public APIs, observable behavior, data contracts and lifecycle beha
 Inspect repository code and declared target-library sources to discover the required changes.
 Translate the repository itself. No example-specific adapter, entry point, model,
 input prompt, test fixture, dependency recipe or implementation plan is supplied.
-Do not invent a replacement API to satisfy a hidden example. Include runnable usage
-notes for the translated repository. Report unsupported capabilities explicitly.
+Implement the target backend so the repository's existing capabilities work through
+its public API. Add backend implementation modules, tests and runnable usage notes
+as new files wherever practical. Make only the small integration edits needed to
+connect them to the existing API. Keep existing files, features, dependency profiles,
+pins and backend installation paths; add target dependencies alongside them.
+Do not delete or rename existing files, remove existing code to simplify the task,
+or replace required behavior with unsupported-operation errors or no-op hooks.
+Do not invent a replacement API to satisfy a hidden example.
+Write TRANSLATION.md as a new file: implemented capabilities, how to run them,
+checks actually performed, and remaining implementation work. If work is incomplete,
+record it there while retaining original behavior; unsupported is not implemented.
+Implementation, tests, usage notes and generated research documents belong in files
+in this tree, not behind download links. Keep temporary discovery under
+translation_discovery/; useful discovery documents will also accompany the draft.
 
 Repository behavior requirements:
 {json.dumps(task['requirements'], indent=2)}

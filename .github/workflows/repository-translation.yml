@@ -236,18 +236,10 @@ jobs:
         with:
           name: translation-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ env.TRANSLATION_RUN_DIR }}/**/*.json
-            ${{ env.TRANSLATION_RUN_DIR }}/**/*.md
-            ${{ env.TRANSLATION_RUN_DIR }}/**/*.log
-            ${{ env.TRANSLATION_RUN_DIR }}/**/*.patch
-            ${{ env.TRANSLATION_RUN_DIR }}/no_graph/candidate/**/*.ipynb
-            ${{ env.TRANSLATION_RUN_DIR }}/graph/candidate/**/*.ipynb
-            ${{ env.TRANSLATION_RUN_DIR }}/no_graph/candidate/translation_discovery/**
-            ${{ env.TRANSLATION_RUN_DIR }}/graph/candidate/translation_discovery/**
-            ${{ env.TRANSLATION_RUN_DIR }}/*/validation-profile/**
-            ${{ env.TRANSLATION_RUN_DIR }}/shared-context/**
-            ${{ env.TRANSLATION_RUN_DIR }}/platform-discovery/**
-            ${{ env.TRANSLATION_RUN_DIR }}/target-retrieval/**
+            ${{ env.TRANSLATION_RUN_DIR }}/no_graph/*.log
+            ${{ env.TRANSLATION_RUN_DIR }}/graph/*.log
+            ${{ env.TRANSLATION_RUN_DIR }}/no_graph/translation.patch
+            ${{ env.TRANSLATION_RUN_DIR }}/graph/translation.patch
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve failed generation or validation
