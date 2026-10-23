@@ -22,24 +22,39 @@ Translation → Run workflow**:
 | `stage` | `run` | Prepare, discover, freeze, generate and package in one job |
 | `condition` | `no-graph` | `graph` adds extracted source/target graphs; `both` runs a pair |
 | `manifest` | `.github/translation/manifest.json` | Repository revision, platforms, behavior requirements, target packages and translator settings |
-| `validator_profile` | Empty | Optional validator invoked after generation; never a translation input |
-| `create_draft_pr` | Checked | Publish the selected condition's original patch as a draft |
+| `runtime_validation` | Checked | Require independent CPU/Mac-Metal comparison before publication |
+| `validator_profile` | Attention Tracker profile | Post-generation comparison settings; never a translation input |
+| `create_draft_pr` | Checked | Publish only complete deliverables; update the existing draft for this condition and base |
 | `pr_base` | `main` | Draft destination |
 | `run_dir` | Empty | Unique directory for hosted `run`; persistent directories are for local stages |
 | `pilot` | Checked | Required for the default Auto-routed model |
 
-Use `condition: both` with `create_draft_pr` unchecked for paired research.
+Use one condition per runtime comparison. For generation-only paired research, use
+`condition: both` with `create_draft_pr` and `runtime_validation` unchecked.
 The default manifest describes vLLM CPU/CUDA → vLLM-Metal on Apple Silicon, but
 contains no Attention Tracker contract or inference settings. Change platform
 names, repository requirements and target packages to use another Python backend.
 The translating model reads source files; it does not execute the target backend.
 The target platform therefore does not determine the hosted generation machine.
 
-Without a validator, generation does not run inference or require a CPU baseline.
-The draft records validation as **skipped**. A selected validator may pass, fail
-or block. A failed/blocked report keeps the action red while still allowing a
-labeled draft. Failed generation, an empty patch or a changed original candidate
-cannot be published as a completed translation. No manual candidate repair occurs.
+Publication waits for completed implementation and notebook deliverables. The model
+must write `translation_discovery/completion.json` declaring `status: complete` and
+an empty `remaining_work` list, plus `TRANSLATION.md`. Every original notebook needs
+a new translated counterpart under `translated_notebooks/<original path>`, with
+nonempty changed code cells and cleared outputs. These checks establish deliverable
+presence, not behavioral correctness or execution of every notebook.
+
+CPU-to-Metal runtime validation is **on by default**. After generation, separate
+read-only jobs provision the source CPU baseline on Ubuntu and the candidate on
+Apple Silicon macOS. The comparison must pass before a PR is opened or updated.
+Turning `runtime_validation` off permits a complete but explicitly unvalidated draft.
+Incomplete generation, failed/blocked validation, and missing runtime hardware
+keep the evidence in Actions and do not open a PR. No manual candidate repair occurs.
+
+A stable bot-owned branch is used per condition and destination branch. Subsequent
+successful runs update that draft, rather than opening one PR per attempt. Branch
+updates use a lease and refuse branches changed by other authors or PRs already
+marked ready for review. Old experimental PRs are not automatically closed.
 
 The draft contains the selected implementation, usage files, experiment results,
 frozen manifest, protocol, prompt and generated discovery documents. Raw execution
@@ -89,7 +104,7 @@ python validate.py --source <frozen-source> --candidate <clean-delivered-candida
 
 The validator must write JSON with `status: pass`, `fail` or `blocked`, with optional
 error/details. A nonzero exit cannot be accepted as success. Missing/broken validators
-are recorded as blocked. The candidate is materialized from the frozen source and
+are recorded as blocked and prevent publication. The candidate is materialized from the frozen source and
 saved implementation patch; supplied graphs, reference libraries and generated plans
 are absent at runtime. The original generated candidate remains unchanged.
 Existing real validation results are preserved; use a new run to change a validator
@@ -148,10 +163,19 @@ for local `act`, not for resuming a previous hosted machine's temporary director
 A job already queued using the old self-hosted labels retains that old definition;
 after merging this fix, cancel it and dispatch a fresh run.
 
-Optional validators need their own runtimes. The provided Metal validator is not
-provisioned on the Ubuntu generation runner; choosing it there reports blocked
-while still permitting a labeled draft. Use native local `act` for actual Metal
-validation, or supply a validator that can run on the hosted machine.
+Hosted runtime validation uses `hosted_runtime.py` with the selected profile's
+`hosted.py` backend runner and `validate.py` comparison. These profile files remain
+outside all translation inputs. Result provenance binds both executions to the
+same source revision, saved candidate patch and validator files. Local `evaluate`
+retains the existing two-interpreter interface below.
+
+The default hosted target is `macos-15`, GitHub's standard Apple Silicon runner.
+`TRANSLATION_METAL_RUNNER` can select another configured hosted Mac label. The
+profile checks that an actual Metal device is available; architecture alone is
+not a passing capability check. No paid larger runner is selected automatically.
+Unavailable GPU support, memory or installation requirements report blocked and
+prevent publication. The first real hosted runtime comparison still needs to be
+verified after merge; offline tests cannot establish hardware support.
 
 ## Local act execution
 
@@ -193,7 +217,7 @@ python3 tests/workflows/translation/smoke_delivery.py --output /tmp/translation-
 
 Tests use a tiny repository and arbitrary target package unrelated to the example.
 They check withheld validator content, identical generation inputs with and without
-validation, graph-only differences, failed/blocked validators still producing drafts,
+validation, graph-only differences, failed/blocked validators preventing drafts,
 immutable original patches, isolated Git publication and W&B metadata boundaries.
 PR CI uploads clearly labeled offline fixture bundles for both modes. These checks
 call no model, run no inference and create no research experiments.
@@ -222,4 +246,4 @@ Implementation, tests and usage notes are ordinary PR files. Downloadable execut
 logs and the original patch are optional raw evidence, not the only copy of the
 review documents. The internal publication bundle is an Actions job handoff.
 The implementation patch remains unchanged; the publisher adds the experiment
-report separately. Failed or skipped validation remains explicit in the draft.
+report separately. Skipped validation is explicit in an opt-out draft. Failed/blocked validation prevents publication.

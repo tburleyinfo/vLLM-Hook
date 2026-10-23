@@ -17,6 +17,11 @@ def prepare(run, condition, validation, output):
     report = json.loads((directory / 'translation-result.json').read_text())
     patch = (directory / 'translation.patch').read_bytes()
     sha = hashlib.sha256(patch).hexdigest()
+    if validation not in ('pass', 'skipped'):
+        raise ValueError('Failed or blocked validation cannot be published')
+    completion = json.loads((directory / 'completion-result.json').read_text())
+    if completion.get('status') != 'pass':
+        raise ValueError('Completed implementation and notebooks required')
     if report.get('status') != 'pass' or not patch or sha != report.get('patch_sha256'):
         raise ValueError('Successful translation and unchanged saved patch required')
     protocol = json.loads((run / 'protocol.json').read_text())
@@ -26,13 +31,13 @@ def prepare(run, condition, validation, output):
     label = {'no_graph': 'no-graph', 'graph': 'graph'}[condition]
     metadata = {'condition': label, 'patch_sha256': sha,
                 'source_revision': manifest['source_revision'], 'validation': validation,
-                'pilot': protocol.get('pilot', True)}
+                'pilot': protocol.get('pilot', True), 'completion': completion}
     (output / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
     review = output / 'review-files'
     review.mkdir(exist_ok=True)
     summary = {
         'condition': label, 'source_revision': manifest['source_revision'],
-        'patch_sha256': sha, 'generation': report,
+        'patch_sha256': sha, 'generation': report, 'completion': completion,
         'validation': json.loads((directory / 'validation-result.json').read_text())
             if (directory / 'validation-result.json').exists() else {'status': validation},
         'runtime_correctness': 'Not established by generation; see validation scope.',
@@ -70,6 +75,10 @@ def publish(bundle, repo, base, checkout, artifact_url=None):
     metadata = json.loads((bundle / 'metadata.json').read_text())
     patch = bundle / 'candidate.patch'
     sha = hashlib.sha256(patch.read_bytes()).hexdigest()
+    if metadata.get('runtime_validation_required') and metadata.get('validation') != 'pass':
+        raise ValueError('CPU/Metal runtime validation must pass before publication')
+    if metadata.get('completion', {}).get('status') != 'pass' or metadata.get('validation') not in ('pass', 'skipped'):
+        raise ValueError('Publication requires completed deliverables and no failed validation')
     if sha != metadata['patch_sha256'] or metadata['condition'] not in ('graph', 'no-graph'):
         raise ValueError('Invalid publication bundle')
     body = (bundle / 'body.md').read_text()
@@ -109,25 +118,31 @@ def publish(bundle, repo, base, checkout, artifact_url=None):
                     command(['git', 'update-index', '--add', '--cacheinfo', '100644', blob, destination], checkout, env)
         tree = command(['git', 'write-tree'], checkout, env)
         title = f'Repository translation ({metadata["condition"]})'
-        branch = f'translation/{metadata["condition"]}-{parent[:10]}-{sha[:12]}'
+        branch = f'translation/result-{metadata["condition"]}-{hashlib.sha256(base.encode()).hexdigest()[:10]}'
         body_file = Path(temporary) / 'body.md'
         body_file.write_text(body)
-        existing = command(['gh', 'pr', 'list', '--repo', repo, '--head', branch, '--state', 'open', '--json', 'url'], checkout)
-        if json.loads(existing):
-            url = json.loads(existing)[0]['url']
+        existing = command(['gh', 'pr', 'list', '--repo', repo, '--head', branch, '--state', 'open', '--json', 'url,isDraft'], checkout)
+        matches = json.loads(existing)
+        if matches and not matches[0].get('isDraft'):
+            raise ValueError('Existing translation PR is ready for review; refusing automatic replacement')
+        remote = command(['git', 'ls-remote', '--heads', 'origin', branch], checkout)
+        previous = remote.split()[0] if remote else ''
+        if previous:
+            command(['git', 'fetch', '--no-tags', 'origin', branch], checkout)
+            if command(['git', 'show', '-s', '--format=%ae', previous], checkout) != env['GIT_AUTHOR_EMAIL']:
+                raise ValueError('Refusing to replace a publication branch modified by another author')
+            if matches and command(['git', 'rev-parse', previous + '^{tree}'], checkout) == tree:
+                command(['gh', 'pr', 'edit', matches[0]['url'], '--repo', repo, '--body-file', str(body_file)], checkout)
+                print(matches[0]['url'])
+                return
+        commit = command(['git', 'commit-tree', tree, '-p', parent, '-m', title], checkout, env)
+        command(['git', 'push', f'--force-with-lease=refs/heads/{branch}:{previous}',
+                 'origin', f'{commit}:refs/heads/{branch}'], checkout)
+        if matches:
+            url = matches[0]['url']
             command(['gh', 'pr', 'edit', url, '--repo', repo, '--body-file', str(body_file)], checkout)
             print(url)
             return
-        remote = command(['git', 'ls-remote', '--heads', 'origin', branch], checkout)
-        if remote:
-            command(['git', 'fetch', '--no-tags', 'origin', branch], checkout)
-            commit = command(['git', 'rev-parse', 'FETCH_HEAD'], checkout)
-            if (command(['git', 'rev-parse', commit + '^{tree}'], checkout) != tree or
-                    command(['git', 'rev-parse', commit + '^'], checkout) != parent):
-                raise ValueError('Existing publication branch differs; refusing to overwrite it')
-        else:
-            commit = command(['git', 'commit-tree', tree, '-p', parent, '-m', title], checkout, env)
-        command(['git', 'push', 'origin', f'{commit}:refs/heads/{branch}'], checkout)
         print(command(['gh', 'pr', 'create', '--repo', repo, '--base', base, '--head', branch,
                        '--draft', '--title', title, '--body-file', str(body_file)], checkout))
 

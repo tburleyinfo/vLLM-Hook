@@ -16,15 +16,19 @@ on:
         options: [run, prepare, discover, retrieve, freeze, translate, evaluate, summary, finish]
         default: run
       condition:
-        description: Supplied graphs; both is research only and cannot publish one draft
+        description: Supplied graphs; both requires publication and runtime validation off
         type: choice
         options: [no-graph, graph, both]
         default: no-graph
       validator_profile:
-        description: Optional post-generation validator profile; leave blank for generation only
-        default: ''
+        description: Independent CPU/Metal runtime validation profile
+        default: .github/translation-validators/attention_tracker/profile.json
+      runtime_validation:
+        description: Require CPU versus Mac/Metal runtime comparison before publishing
+        type: boolean
+        default: true
       create_draft_pr:
-        description: Open a draft containing the selected original implementation patch
+        description: Publish completed deliverables only; reuse the draft for this condition and base
         type: boolean
         default: true
       pr_base:
@@ -132,6 +136,8 @@ jobs:
         shell: bash
         env:
           TRANSLATION_STAGE: ${{ inputs.stage }}
+          CONDITION: ${{ inputs.condition }}
+          RUNTIME_REQUIRED: ${{ inputs.runtime_validation }}
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
           WANDB_API_KEY: ${{ secrets.WANDB_API_KEY }}
           WANDB_ENTITY: ${{ vars.TRANSLATION_WANDB_ENTITY }}
@@ -139,6 +145,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$TRANSLATION_STAGE" == "run" ]] || { echo '::error::Hosted runners are fresh machines. Use stage=run; separate stages are for local act.'; exit 1; }
+          [[ "$CONDITION" != "both" || "$RUNTIME_REQUIRED" != "true" ]] || { echo '::error::Choose one condition per runtime comparison, or turn runtime_validation off for a generation-only pair.'; exit 1; }
           [[ -n "$COPILOT_GITHUB_TOKEN" ]] || { echo '::error::Add repository Actions secret COPILOT_GITHUB_TOKEN.'; exit 1; }
           [[ -n "$WANDB_API_KEY" ]] || { echo '::error::Add repository Actions secret WANDB_API_KEY for required trial logging.'; exit 1; }
           [[ -n "$WANDB_ENTITY" && -n "$WANDB_PROJECT" ]] || { echo '::error::Set TRANSLATION_WANDB_ENTITY and TRANSLATION_WANDB_PROJECT repository variables.'; exit 1; }
@@ -166,6 +173,7 @@ jobs:
           TRANSLATION_CONDITION: ${{ inputs.condition }}
           VALIDATOR_PROFILE: ${{ inputs.validator_profile }}
           CREATE_DRAFT: ${{ inputs.create_draft_pr }}
+          RUNTIME_VALIDATION: ${{ inputs.runtime_validation }}
           TRANSLATION_MANIFEST: ${{ inputs.manifest }}
           TRANSLATION_STAGE: ${{ inputs.stage }}
           TRANSLATION_REQUESTED_RUN_DIR: ${{ inputs.run_dir }}
@@ -209,19 +217,31 @@ jobs:
           args=(--stage "$TRANSLATION_STAGE" --run-dir "$run_dir" --manifest "$TRANSLATION_MANIFEST" --condition "$TRANSLATION_CONDITION")
           if [[ "$TRANSLATION_PILOT" == "true" ]]; then args+=(--pilot); fi
           if [[ -n "$TRANSLATION_TARGET_SITE" ]]; then args+=(--target-site "$TRANSLATION_TARGET_SITE"); fi
-          if [[ -n "$VALIDATOR_PROFILE" ]]; then args+=(--validator-profile "$VALIDATOR_PROFILE"); fi
+          if [[ "${ACT:-}" == "true" && "$RUNTIME_VALIDATION" == "true" && -n "$VALIDATOR_PROFILE" ]]; then args+=(--validator-profile "$VALIDATOR_PROFILE"); fi
           if [[ "$TRANSLATION_STAGE" == "run" || "$TRANSLATION_STAGE" == "finish" ]]; then
-            if [[ "$CREATE_DRAFT" == "true" ]]; then
+            if [[ "$CREATE_DRAFT" == "true" || "$RUNTIME_VALIDATION" == "true" ]]; then
               args+=(--prepare-pr "$RUNNER_TEMP/translation-pr")
             fi
           fi
           "${TRANSLATION_PYTHON:-python3}" .github/scripts/translation/run.py "${args[@]}"
       - name: Check publication bundle
+        env:
+          RUNTIME_REQUIRED: ${{ inputs.runtime_validation }}
         id: bundle
-        if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && inputs.create_draft_pr && !env.ACT }}
+        if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && (inputs.create_draft_pr || inputs.runtime_validation) && !env.ACT }}
         shell: bash
         run: |
-          if [[ -f "$RUNNER_TEMP/translation-pr/metadata.json" ]]; then echo 'ready=true' >> "$GITHUB_OUTPUT"; fi
+          if [[ -f "$RUNNER_TEMP/translation-pr/metadata.json" ]]; then
+            python3 - <<'PYTHON'
+          import json, os
+          from pathlib import Path
+          path = Path(os.environ['RUNNER_TEMP']) / 'translation-pr/metadata.json'
+          metadata = json.loads(path.read_text())
+          metadata['runtime_validation_required'] = os.environ['RUNTIME_REQUIRED'] == 'true'
+          path.write_text(json.dumps(metadata, indent=2) + '\n')
+          PYTHON
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
+          fi
       - name: Upload selected candidate
         if: ${{ always() && steps.bundle.outputs.ready == 'true' }}
         uses: actions/upload-artifact@v4
@@ -240,15 +260,111 @@ jobs:
             ${{ env.TRANSLATION_RUN_DIR }}/graph/*.log
             ${{ env.TRANSLATION_RUN_DIR }}/no_graph/translation.patch
             ${{ env.TRANSLATION_RUN_DIR }}/graph/translation.patch
+            ${{ env.TRANSLATION_RUN_DIR }}/*/*-result.json
+            ${{ env.TRANSLATION_RUN_DIR }}/*/candidate/TRANSLATION.md
+            ${{ env.TRANSLATION_RUN_DIR }}/*/candidate/translated_notebooks/**
+            ${{ env.TRANSLATION_RUN_DIR }}/*/candidate/translation_discovery/**
           if-no-files-found: warn
           retention-days: 14
       - name: Preserve failed generation or validation
         if: ${{ always() && steps.experiment.outcome == 'failure' }}
         run: exit 1
 
-  publish:
+  runtime-validation:
     needs: experiment
-    if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && inputs.create_draft_pr && inputs.condition != 'both' && needs.experiment.outputs.bundle_ready == 'true' }}
+    if: ${{ always() && inputs.runtime_validation && needs.experiment.result == 'success' && needs.experiment.outputs.bundle_ready == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: cpu
+            runner: ubuntu-22.04
+          - backend: target
+            runner: macos-15
+    runs-on: ${{ matrix.backend == 'target' && vars.TRANSLATION_METAL_RUNNER || matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: translation-pr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/translation-pr
+      - name: Execute independent backend fixture
+        env:
+          BACKEND: ${{ matrix.backend }}
+          PROFILE: ${{ inputs.validator_profile }}
+        run: |
+          python3 .github/scripts/translation/hosted_runtime.py \
+            --bundle "$RUNNER_TEMP/translation-pr" --profile "$PROFILE" \
+            --backend "$BACKEND" --output "$RUNNER_TEMP/runtime-result"
+      - name: Preserve backend result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: translation-runtime-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/runtime-result/result.json
+            ${{ runner.temp }}/runtime-result/execution.log
+          if-no-files-found: warn
+
+  runtime-compare:
+    needs: [experiment, runtime-validation]
+    if: ${{ always() && inputs.runtime_validation && needs.experiment.result == 'success' && needs.experiment.outputs.bundle_ready == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      ready: ${{ steps.compare.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: translation-pr-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/translation-pr
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: translation-runtime-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-results
+      - name: Compare CPU and Metal and authorize publication
+        id: compare
+        env:
+          PROFILE: ${{ inputs.validator_profile }}
+        run: |
+          python3 .github/scripts/translation/hosted_runtime.py \
+            --bundle "$RUNNER_TEMP/translation-pr" --profile "$PROFILE" \
+            --cpu "$RUNNER_TEMP/runtime-results/translation-runtime-cpu-${{ github.run_id }}-${{ github.run_attempt }}/result.json" \
+            --target "$RUNNER_TEMP/runtime-results/translation-runtime-target-${{ github.run_id }}-${{ github.run_attempt }}/result.json" \
+            --output "$RUNNER_TEMP/runtime-comparison.json"
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: translation-runtime-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runtime-comparison.json
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@v4
+        if: ${{ steps.compare.outputs.ready == 'true' }}
+        with:
+          name: translation-validated-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/translation-pr/
+
+  publish:
+    needs: [experiment, runtime-compare]
+    if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && inputs.create_draft_pr && inputs.condition != 'both' && needs.experiment.result == 'success' && needs.experiment.outputs.bundle_ready == 'true' && (!inputs.runtime_validation || needs.runtime-compare.outputs.ready == 'true') }}
+    concurrency:
+      group: translation-publish-${{ inputs.pr_base }}-${{ inputs.condition }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -257,9 +373,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: translation-pr-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.runtime_validation && 'translation-validated' || 'translation-pr' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/translation-pr
-      - name: Open selected repository patch as a draft
+      - name: Open or update the completed translation draft
         env:
           GH_TOKEN: ${{ github.token }}
           PR_BASE: ${{ inputs.pr_base }}

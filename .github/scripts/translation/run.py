@@ -18,6 +18,7 @@ import platform_evidence
 import repository_graph
 import publish_candidate
 import tracking
+import completion
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
@@ -147,6 +148,15 @@ Do not invent a replacement API to satisfy a hidden example.
 Write TRANSLATION.md as a new file: implemented capabilities, how to run them,
 checks actually performed, and remaining implementation work. If work is incomplete,
 record it there while retaining original behavior; unsupported is not implemented.
+Translate every existing source notebook into a NEW notebook at
+translated_notebooks/<original repository-relative path>. Preserve original notebooks.
+Use the translated public API and target backend, with install/setup and runnable
+end-to-end cells matching the original use case. Clear cell outputs and execution
+counts. These are deliverable files, not download links or documentation substitutes.
+When all implementation and notebook work is finished, write
+translation_discovery/completion.json with {{"status":"complete","remaining_work":[]}}.
+Otherwise use status "incomplete" and list unfinished work in remaining_work.
+A completed model process alone does not mean the translation is complete.
 Implementation, tests, usage notes and generated research documents belong in files
 in this tree, not behind download links. Keep temporary discovery under
 translation_discovery/; useful discovery documents will also accompany the draft.
@@ -351,13 +361,14 @@ def summarize(run):
         directory = run / condition
         generation = json.loads((directory / "translation-result.json").read_text()) if (directory / "translation-result.json").exists() else {"status": "not_run"}
         validation = json.loads((directory / "validation-result.json").read_text()) if (directory / "validation-result.json").exists() else {"status": "not_run"}
-        rows[condition] = {"translation": generation, "validation": validation}
+        completed = json.loads((directory / "completion-result.json").read_text()) if (directory / "completion-result.json").exists() else {"status": "not_run"}
+        rows[condition] = {"translation": generation, "completion": completed, "validation": validation}
     result = {"conditions": rows, "graph_effect_claim": "not established"}
     write_json(run / "results.json", result)
-    lines = ["# Repository translation run", "", "| Condition | Generation | Optional validation |",
-             "| --- | --- | --- |"]
+    lines = ["# Repository translation run", "", "| Condition | Generation | Deliverables | Runtime validation |",
+             "| --- | --- | --- | --- |"]
     for condition, row in rows.items():
-        lines.append(f'| {condition} | {row["translation"]["status"]} | {row["validation"]["status"]} |')
+        lines.append(f'| {condition} | {row["translation"]["status"]} | {row["completion"]["status"]} | {row["validation"]["status"]} |')
     lines += ["", "Generation and artifact delivery do not establish runtime correctness or a graph advantage."]
     (run / "results.md").write_text("\n".join(lines) + "\n")
     for condition, row in rows.items():
@@ -431,7 +442,11 @@ def main():
                 failed = failed or validation not in ("pass", "skipped")
                 write_json(directory / "delivery-result.json", {"condition": args.condition, "validation": validation,
                     "patch_sha256": generation["patch_sha256"]})
-                if args.prepare_pr:
+                completed = completion.check(run / 'source', directory / 'candidate')
+                write_json(directory / 'completion-result.json', completed)
+                eligible = completed['status'] == 'pass' and validation in ('pass', 'skipped')
+                failed = failed or not eligible
+                if args.prepare_pr and eligible:
                     publish_candidate.prepare(run, condition, validation, args.prepare_pr.resolve())
     if args.stage == "evaluate":
         for condition in conditions:

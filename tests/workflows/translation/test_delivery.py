@@ -21,6 +21,7 @@ class DeliveryTests(unittest.TestCase):
                 directory = root / condition
                 directory.mkdir()
                 (directory / 'translation.patch').write_bytes(content)
+                (directory / 'completion-result.json').write_text(json.dumps({'status': 'pass'}))
                 (directory / 'translation-result.json').write_text(json.dumps({'status': 'pass', 'patch_sha256': hashlib.sha256(content).hexdigest()}))
             (root / 'protocol.json').write_text('{}')
             (root / 'manifest.json').write_text(json.dumps({'source_revision': 'a' * 40}))
@@ -60,7 +61,7 @@ class DeliveryTests(unittest.TestCase):
             bundle = root / 'bundle'
             bundle.mkdir()
             (bundle / 'candidate.patch').write_bytes(saved)
-            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'patch_sha256': hashlib.sha256(saved).hexdigest()}))
+            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'completion': {'status': 'pass'}, 'validation': 'skipped', 'patch_sha256': hashlib.sha256(saved).hexdigest()}))
             (bundle / 'body.md').write_text('Validation: skipped')
             (bundle / 'review-files/discovery').mkdir(parents=True)
             (bundle / 'review-files/README.md').write_text('Experiment report\n')
@@ -68,20 +69,25 @@ class DeliveryTests(unittest.TestCase):
             actual = delivery.command
             pushed = []
             published_bodies = []
+            remote_state = {}
+            edited = []
             def fake(args, cwd, env=None):
                 if args[:2] == ['git', 'fetch']:
                     (repo / '.git/FETCH_HEAD').write_text(base + '\n')
                     return ''
                 if args[:2] == ['git', 'ls-remote']:
-                    return ''
+                    return remote_state.get('commit', '')
                 if args[:2] == ['git', 'push']:
                     pushed.append(args[-1].split(':')[0])
+                    remote_state['commit'] = pushed[-1]
+                    remote_state['branch'] = args[-1].split(':refs/heads/')[1]
                     return ''
                 if args[0] == 'gh':
                     if args[2] == 'create':
                         self.assertIn('--draft', args)
                         published_bodies.append(Path(args[args.index('--body-file') + 1]).read_text())
-                    return '[]' if args[2] == 'list' else 'https://github.com/example/project/pull/1'
+                    if args[2] == 'edit': edited.append(args[3])
+                    return (json.dumps([{'url': 'https://github.com/example/project/pull/1', 'isDraft': True}]) if remote_state else '[]') if args[2] == 'list' else 'https://github.com/example/project/pull/1'
                 return actual(args, cwd, env)
             with patch.object(delivery, 'command', side_effect=fake):
                 delivery.publish(bundle, 'example/project', 'main', repo, 'https://github.com/example/project/actions/runs/1/artifacts/2')
@@ -95,11 +101,32 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual(git('show', pushed[0] + ':' + prefix + '/discovery/plan.md'), 'Generated plan')
             self.assertEqual(git('show', pushed[0] + ':application.py'), 'candidate')
             self.assertEqual(git('rev-parse', pushed[0] + '^'), base)
+            # Re-running a completed candidate reuses the existing draft.
+            branch = remote_state['branch']
+            with patch.object(delivery, 'command', side_effect=fake):
+                delivery.publish(bundle, 'example/project', 'main', repo)
+            self.assertEqual(len(published_bodies), 1)
+            self.assertEqual(len(pushed), 1)
+            self.assertTrue(edited)
+            # A revised successful candidate replaces that same bot-owned branch.
+            (repo / 'application.py').write_text('revised candidate\n')
+            revised = subprocess.check_output(['git', 'diff', '--binary', '--', 'application.py'], cwd=repo)
+            (repo / 'application.py').write_text('user local work\n')
+            (bundle / 'candidate.patch').write_bytes(revised)
+            metadata = json.loads((bundle / 'metadata.json').read_text())
+            metadata['patch_sha256'] = hashlib.sha256(revised).hexdigest()
+            (bundle / 'metadata.json').write_text(json.dumps(metadata))
+            with patch.object(delivery, 'command', side_effect=fake):
+                delivery.publish(bundle, 'example/project', 'main', repo)
+            self.assertEqual(remote_state['branch'], branch)
+            self.assertEqual(len(published_bodies), 1)
+            self.assertEqual(len(pushed), 2)
+            self.assertEqual(git('show', pushed[-1] + ':application.py'), 'revised candidate')
             # Deleting an existing source file cannot be published.
             (repo / 'application.py').unlink()
             removed = subprocess.check_output(['git', 'diff', '--binary', '--', 'application.py'], cwd=repo)
             (bundle / 'candidate.patch').write_bytes(removed)
-            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'patch_sha256': hashlib.sha256(removed).hexdigest()}))
+            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'completion': {'status': 'pass'}, 'validation': 'skipped', 'patch_sha256': hashlib.sha256(removed).hexdigest()}))
             pushed.clear()
             with patch.object(delivery, 'command', side_effect=fake), self.assertRaisesRegex(ValueError, 'preserve existing files'):
                 delivery.publish(bundle, 'example/project', 'main', repo)
@@ -110,7 +137,7 @@ class DeliveryTests(unittest.TestCase):
             git('add', '-N', '.github/workflows/candidate.yml')
             bad = subprocess.check_output(['git', 'diff', '--binary', '--', '.github/workflows/candidate.yml'], cwd=repo)
             (bundle / 'candidate.patch').write_bytes(bad)
-            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'patch_sha256': hashlib.sha256(bad).hexdigest()}))
+            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'completion': {'status': 'pass'}, 'validation': 'skipped', 'patch_sha256': hashlib.sha256(bad).hexdigest()}))
             pushed.clear()
             with patch.object(delivery, 'command', side_effect=fake), self.assertRaises(ValueError):
                 delivery.publish(bundle, 'example/project', 'main', repo)
