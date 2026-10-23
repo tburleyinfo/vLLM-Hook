@@ -1,0 +1,27 @@
+{
+  "condition": "graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "patch_sha256": "f5189108bba949a75c37f71251452ed7ec35e3762e274b9d5f19476559ba11cb",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 260.97,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "backend-findings.md": "a33db26fd3f9ed7af35d43e973af81a007baf405acd03132869c4a852256513e"
+    },
+    "patch_sha256": "f5189108bba949a75c37f71251452ed7ec35e3762e274b9d5f19476559ba11cb",
+    "patch_nonempty": true
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "No validator selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}
