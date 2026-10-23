@@ -28,13 +28,42 @@ def prepare(run, condition, validation, output):
                 'source_revision': manifest['source_revision'], 'validation': validation,
                 'pilot': protocol.get('pilot', True)}
     (output / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    review = output / 'review-files'
+    review.mkdir(exist_ok=True)
+    summary = {
+        'condition': label, 'source_revision': manifest['source_revision'],
+        'patch_sha256': sha, 'generation': report,
+        'validation': json.loads((directory / 'validation-result.json').read_text())
+            if (directory / 'validation-result.json').exists() else {'status': validation},
+        'runtime_correctness': 'Not established by generation; see validation scope.',
+        'graph_advantage': 'Not established',
+    }
+    (review / 'experiment.json').write_text(json.dumps(summary, indent=2) + '\n')
+    (review / 'README.md').write_text(
+        f'# Translation experiment ({label})\n\n'
+        f'Generation: **{report["status"]}**. Validation: **{validation}**.\n\n'
+        'Generation success does not establish runtime correctness. '
+        'Skipped validation is not a passing functional test.\n\n'
+        'Implementation and usage notes are in the PR files. '
+        'experiment.json records the original patch hash and results. '
+        'discovery/ contains translator-generated research documents, when present.\n')
+    for name in ('manifest.json', 'protocol.json'):
+        (review / name).write_bytes((run / name).read_bytes())
+    if (directory / 'prompt.md').exists():
+        (review / 'prompt.md').write_bytes((directory / 'prompt.md').read_bytes())
+    discovery = directory / 'candidate/translation_discovery'
+    if discovery.exists():
+        for path in discovery.rglob('*'):
+            if path.is_symlink():
+                raise ValueError('Discovery documents must not be symlinks')
+            if path.is_file():
+                target = review / 'discovery' / path.relative_to(discovery)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(path.read_bytes())
     (output / 'body.md').write_text(
-        f'Repository translation using **{label}**.\n\n'
-        f'Validation: **{validation}**. Skipped validation does not establish parity.\n\n'
-        'Only this candidate\'s saved changes are included. Experiment logs and the other candidate are excluded.\n\n'
-        'Optional validation establishes only the selected validator’s tested scope; '
-        'this pilot does not establish a graph advantage.\n\n'
-        f'Source: `{manifest["source_revision"]}`\n\nPatch SHA-256: `{sha}`\n')
+        f'Repository translation using **{label}**. Validation: **{validation}**.\n\n'
+        'Implementation, usage notes and experiment evidence are included in the changed files.\n')
+
 
 
 def publish(bundle, repo, base, checkout, artifact_url=None):
@@ -45,7 +74,7 @@ def publish(bundle, repo, base, checkout, artifact_url=None):
         raise ValueError('Invalid publication bundle')
     body = (bundle / 'body.md').read_text()
     if artifact_url:
-        body += f'\n[Download the generation reports, discovery artifacts and original patch]({artifact_url}).\n'
+        body += f'\n[Raw execution evidence]({artifact_url}) (optional).\n'
     origin = command(['git', 'remote', 'get-url', 'origin'], checkout)
     if origin.removesuffix('.git').rstrip('/') not in (f'https://github.com/{repo}', f'git@github.com:{repo}'):
         raise ValueError('Destination must match origin')
@@ -63,6 +92,21 @@ def publish(bundle, repo, base, checkout, artifact_url=None):
         protected = {'.git', '.github', 'platform_reference', 'target_relationships', 'translation_discovery'}
         if not any(paths) or any(Path(path).parts[0] in protected for path in paths if path):
             raise ValueError('Patch changes workflow infrastructure, supplied evidence or internal discovery artifacts')
+        deleted = command(['git', 'diff', '--cached', '--no-renames', '--diff-filter=D', '--name-only', parent], checkout, env)
+        if deleted:
+            raise ValueError('Translation must preserve existing files: ' + deleted)
+        review = bundle / 'review-files'
+        if review.exists():
+            prefix = f'translation-experiments/{metadata["condition"]}-{sha}'
+            for path in sorted(review.rglob('*')):
+                if path.is_symlink():
+                    raise ValueError('Review files must not be symlinks')
+                if path.is_file():
+                    destination = prefix + '/' + path.relative_to(review).as_posix()
+                    if command(['git', 'ls-files', '--', destination], checkout, env):
+                        raise ValueError('Experiment evidence would overwrite an existing file')
+                    blob = command(['git', 'hash-object', '-w', str(path.resolve())], checkout)
+                    command(['git', 'update-index', '--add', '--cacheinfo', '100644', blob, destination], checkout, env)
         tree = command(['git', 'write-tree'], checkout, env)
         title = f'Repository translation ({metadata["condition"]})'
         branch = f'translation/{metadata["condition"]}-{parent[:10]}-{sha[:12]}'
