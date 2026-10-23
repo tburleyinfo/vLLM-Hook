@@ -56,13 +56,13 @@ class GenericWorkflowTests(unittest.TestCase):
         runner.platform_evidence.freeze(run)
         return run
 
-    def invoke(self, name, validator=None, expect_failure=False):
+    def invoke(self, name, validator=None, expect_failure=False, generator=generate_fixture):
         run, bundle = self.root / name, self.root / (name + '-bundle')
         args = ['run.py', '--stage', 'run', '--run-dir', str(run), '--manifest', str(self.manifest_path),
                 '--target-site', str(self.site), '--condition', 'graph', '--pilot', '--prepare-pr', str(bundle)]
         if validator:
             args += ['--validator-profile', str(validator)]
-        with patch('sys.argv', args), patch.object(runner, 'translate', side_effect=generate_fixture):
+        with patch('sys.argv', args), patch.object(runner, 'translate', side_effect=generator):
             if expect_failure:
                 with self.assertRaises(SystemExit) as caught:
                     runner.main()
@@ -125,7 +125,18 @@ class GenericWorkflowTests(unittest.TestCase):
         self.assertFalse((delivered / 'translation_discovery').exists())
         self.assertNotIn(b'translation_discovery', (bundle / 'candidate.patch').read_bytes())
 
-    def test_failed_optional_validator_does_not_change_generation_inputs_or_prevent_draft(self):
+    def test_incomplete_implementation_keeps_evidence_without_draft(self):
+        def incomplete(run, condition, pilot):
+            report = generate_fixture(run, condition, pilot)
+            runner.write_json(run / condition / 'candidate/translation_discovery/completion.json',
+                              {'status': 'incomplete', 'remaining_work': ['Wire backend into public API']})
+            return report
+        run, bundle = self.invoke('incomplete', expect_failure=True, generator=incomplete)
+        self.assertFalse(bundle.exists())
+        self.assertTrue((run / 'graph/translation.patch').is_file())
+        self.assertEqual(json.loads((run / 'graph/completion-result.json').read_text())['status'], 'incomplete')
+
+    def test_failed_optional_validator_preserves_inputs_but_prevents_draft(self):
         without, _ = self.invoke('without')
         profile = self.validator()
         with_validator, bundle = self.invoke('with', profile, expect_failure=True)
@@ -133,19 +144,19 @@ class GenericWorkflowTests(unittest.TestCase):
             self.assertEqual((without / condition / 'prompt.md').read_bytes(), (with_validator / condition / 'prompt.md').read_bytes())
             self.assertNotIn('EVALUATOR_ONLY_MARKER', (with_validator / condition / 'prompt.md').read_text())
             self.assertFalse((with_validator / condition / 'candidate/validation-profile').exists())
-        self.assertEqual(json.loads((bundle / 'metadata.json').read_text())['validation'], 'fail')
+        self.assertFalse(bundle.exists())
         evidence = json.loads((with_validator / 'graph/validation-evidence.json').read_text())
         self.assertFalse(evidence['supplied_to_translator'])
-        self.assertEqual((bundle / 'candidate.patch').read_bytes(), (with_validator / 'graph/translation.patch').read_bytes())
+        self.assertTrue((with_validator / 'graph/translation.patch').is_file())
 
     def test_validator_success_with_nonzero_exit_is_failure(self):
         run, bundle = self.invoke('bad-exit', self.validator('pass', 2), expect_failure=True)
-        self.assertEqual(json.loads((bundle / 'metadata.json').read_text())['validation'], 'fail')
+        self.assertFalse(bundle.exists())
         self.assertIn('exited unsuccessfully', (run / 'graph/validation-result.json').read_text())
 
-    def test_missing_validator_is_blocked_and_still_packages_draft(self):
+    def test_missing_validator_is_blocked_without_draft(self):
         run, bundle = self.invoke('missing', self.root / 'unavailable-validator/profile.json', expect_failure=True)
-        self.assertEqual(json.loads((bundle / 'metadata.json').read_text())['validation'], 'blocked')
+        self.assertFalse(bundle.exists())
 
     def test_original_validation_is_not_overwritten(self):
         run, _ = self.invoke('immutable-validation', self.validator(), expect_failure=True)
@@ -201,11 +212,11 @@ class GenericWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "outside the generated run"):
             runner.check_validator_location(self.root / "run/profile.json", self.root / "run")
 
-    def test_malformed_optional_validator_still_allows_blocked_draft(self):
+    def test_malformed_optional_validator_prevents_draft(self):
         profile = self.validator()
         runner.write_json(profile, {"script": ["bad"], "config": "settings.json"})
         run, bundle = self.invoke("malformed", profile, expect_failure=True)
-        self.assertEqual(json.loads((bundle / "metadata.json").read_text())["validation"], "blocked")
+        self.assertFalse(bundle.exists())
 
     def test_tracking_failure_prevents_model_usage(self):
         with patch.object(runner.tracking, 'register', side_effect=ValueError('Tracking unavailable')), \

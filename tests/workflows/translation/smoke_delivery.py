@@ -15,6 +15,12 @@ def generate_fixture(run, condition, pilot):
     (candidate / 'smoke_translation_fixture.py').write_text('# Delivery plumbing fixture; not a real translation.\nVALUE = 1\n')
     notes = candidate / 'translation_discovery'
     notes.mkdir()
+    (candidate / 'TRANSLATION.md').write_text('Offline fixture only.\n')
+    (notes / 'completion.json').write_text(json.dumps({'status': 'complete', 'remaining_work': []}))
+    for target in runner.completion.notebook_outputs(run / 'source').values():
+        path = candidate / target
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'cells': [{'cell_type': 'code', 'source': ['print("Offline fixture")'], 'outputs': [], 'execution_count': None, 'metadata': {}}], 'metadata': {}, 'nbformat': 4, 'nbformat_minor': 5}))
     (notes / 'plan.md').write_text('Synthetic delivery fixture; no model was called.\n')
     notebook = candidate / 'notebooks/smoke_delivery.ipynb'
     notebook.parent.mkdir(exist_ok=True)
