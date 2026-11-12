@@ -12,16 +12,16 @@ def command(args, cwd, env=None):
     return subprocess.check_output(args, cwd=cwd, env=env).decode().strip()
 
 
-def prepare(run, condition, validation, output):
+def prepare(run, condition, validation, output, *, for_runtime=False):
     directory = run / condition
     report = json.loads((directory / 'translation-result.json').read_text())
     patch = (directory / 'translation.patch').read_bytes()
     sha = hashlib.sha256(patch).hexdigest()
-    if validation not in ('pass', 'skipped'):
+    if validation not in ('pass', 'skipped') and not (for_runtime and validation == 'pending'):
         raise ValueError('Failed or blocked validation cannot be published')
     completion = json.loads((directory / 'completion-result.json').read_text())
-    if completion.get('status') != 'pass':
-        raise ValueError('Completed implementation and notebooks required')
+    if completion.get('status') != 'pass' and not for_runtime:
+        raise ValueError('Completed implementation and required deliverables are required')
     if report.get('status') != 'pass' or not patch or sha != report.get('patch_sha256'):
         raise ValueError('Successful translation and unchanged saved patch required')
     protocol = json.loads((run / 'protocol.json').read_text())
@@ -31,12 +31,18 @@ def prepare(run, condition, validation, output):
     label = {'no_graph': 'no-graph', 'graph': 'graph'}[condition]
     metadata = {'condition': label, 'patch_sha256': sha,
                 'source_revision': manifest['source_revision'], 'validation': validation,
-                'pilot': protocol.get('pilot', True), 'completion': completion}
+                'pilot': report.get('experimental_status') != 'fixed-model candidate generation', 'completion': completion,
+                'experiment_id': protocol.get('experiment_id', ''), 'use_case': protocol.get('use_case', ''),
+                'runtime_validation_required': for_runtime}
     (output / 'metadata.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    receipt = directory / 'tracking.json'
+    if for_runtime and receipt.is_file():
+        (output / 'tracking.json').write_bytes(receipt.read_bytes())
     review = output / 'review-files'
     review.mkdir(exist_ok=True)
     summary = {
         'condition': label, 'source_revision': manifest['source_revision'],
+        'experiment_id': metadata['experiment_id'], 'use_case': metadata['use_case'],
         'patch_sha256': sha, 'generation': report, 'completion': completion,
         'validation': json.loads((directory / 'validation-result.json').read_text())
             if (directory / 'validation-result.json').exists() else {'status': validation},

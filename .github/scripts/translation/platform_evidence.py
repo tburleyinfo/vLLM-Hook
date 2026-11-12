@@ -78,6 +78,9 @@ def freeze(run):
     protocol['shared_context_files'] = inventory(context)
     protocol['graph_files'] = inventory(run / 'target-retrieval')
     protocol['condition_context_files'] = {}
+    protocol['available_input_bytes'] = {}
+    source_bytes = sum((run / 'source' / name).stat().st_size for name in protocol['source_files'])
+    shared_bytes = sum((context / name).stat().st_size for name in protocol['shared_context_files'])
     for condition in ('no_graph', 'graph'):
         directory = run / condition
         candidate = directory / 'candidate'
@@ -92,6 +95,10 @@ def freeze(run):
             names.append('target_relationships')
             prompt += '\nSupplied graphs: target_relationships/relationships.md and target_relationships/source/relationships.md.\n'
         protocol['condition_context_files'][condition] = inventory(candidate / 'target_relationships')
+        graph_bytes = sum((candidate / 'target_relationships' / name).stat().st_size
+                          for name in protocol['condition_context_files'][condition])
+        protocol['available_input_bytes'][condition] = {
+            'prompt': len(prompt.encode()), 'source': source_bytes, 'shared': shared_bytes, 'graph': graph_bytes}
         subprocess.run(['git', 'add', *names], cwd=candidate, check=True)
         subprocess.run(['git', '-c', 'user.name=Translation', '-c', 'user.email=translation@localhost',
                         '-c', 'commit.gpgsign=false', 'commit', '-qm', 'Frozen library context'], cwd=candidate, check=True)

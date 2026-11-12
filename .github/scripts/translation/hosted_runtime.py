@@ -3,10 +3,12 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import platform
 import subprocess
 import sys
 import tarfile
 import io
+import time
 
 
 def write(path, value):
@@ -37,6 +39,7 @@ def selected_profile(profile):
 
 
 def execute(bundle, profile, backend, output):
+    started = time.perf_counter()
     selected = selected_profile(profile)
     metadata = json.loads((bundle / 'metadata.json').read_text())
     patch = (bundle / 'candidate.patch').read_bytes()
@@ -66,6 +69,7 @@ def execute(bundle, profile, backend, output):
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         result = {'status': 'blocked', 'error': str(error)}
     result.update(backend=backend, patch_sha256=metadata['patch_sha256'], source_revision=metadata['source_revision'], validator_sha256=selected['sha256'])
+    result.update(platform=platform.system(), architecture=platform.machine(), elapsed_seconds=time.perf_counter() - started)
     write(report, result)
     return result
 
@@ -73,8 +77,11 @@ def execute(bundle, profile, backend, output):
 def finalize(bundle, profile, cpu, target, output):
     selected = selected_profile(profile)
     metadata = json.loads((bundle / 'metadata.json').read_text())
+    provenance = {key: metadata.get(key) for key in ('experiment_id', 'use_case', 'condition', 'source_revision', 'patch_sha256')}
+    provenance['validator_sha256'] = selected['sha256']
     if not cpu.is_file() or not target.is_file():
-        result = {'status': 'blocked', 'error': 'Missing backend runtime evidence'}
+        missing = [backend for backend, path in (('cpu', cpu), ('target', target)) if not path.is_file()]
+        result = {**provenance, 'status': 'blocked', 'error': 'Missing backend runtime evidence: ' + ', '.join(missing)}
         write(output, result)
         return result
     source, translated = json.loads(cpu.read_text()), json.loads(target.read_text())
@@ -92,10 +99,11 @@ def finalize(bundle, profile, cpu, target, output):
     spec.loader.exec_module(validator)
     settings = json.loads(selected['config'].read_text())
     result = validator.compare(source, translated, settings['tolerance'])
-    result.update(patch_sha256=metadata['patch_sha256'], validator_sha256=selected['sha256'], executions={'cpu': source, 'target': translated})
+    result.update(provenance, executions={'cpu': source, 'target': translated})
     write(output, result)
     if result['status'] != 'pass':
         return result
+    previous = metadata['validation']
     metadata['validation'] = 'pass'
     metadata['runtime_validation_required'] = True
     write(bundle / 'metadata.json', metadata)
@@ -104,9 +112,9 @@ def finalize(bundle, profile, cpu, target, output):
     experiment['validation'] = result
     write(bundle / 'review-files/experiment.json', experiment)
     body = bundle / 'body.md'
-    body.write_text(body.read_text().replace('Validation: **skipped**', 'Validation: **pass**'))
+    body.write_text(body.read_text().replace(f'Validation: **{previous}**', 'Validation: **pass**'))
     summary = bundle / 'review-files/README.md'
-    summary.write_text(summary.read_text().replace('Validation: **skipped**', 'Validation: **pass**') +
+    summary.write_text(summary.read_text().replace(f'Validation: **{previous}**', 'Validation: **pass**') +
                        '\nCPU/Metal comparison passed within the selected profile; see runtime-validation.json.\n')
     return result
 

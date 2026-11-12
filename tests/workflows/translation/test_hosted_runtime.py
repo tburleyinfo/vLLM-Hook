@@ -17,11 +17,11 @@ class HostedRuntimeTests(unittest.TestCase):
     def fixture(self, root, target_status='pass'):
         bundle = root / 'bundle'
         (bundle / 'review-files').mkdir(parents=True)
-        metadata = {'patch_sha256': 'candidate', 'source_revision': 'source',
-                    'completion': {'status': 'pass'}, 'validation': 'skipped', 'runtime_validation_required': True}
+        metadata = {'patch_sha256': 'candidate', 'source_revision': 'source', 'experiment_id': 'pair-1',
+                    'completion': {'status': 'pass'}, 'validation': 'pending', 'runtime_validation_required': True}
         (bundle / 'metadata.json').write_text(json.dumps(metadata))
-        (bundle / 'body.md').write_text('Validation: **skipped**')
-        (bundle / 'review-files/README.md').write_text('Validation: **skipped**')
+        (bundle / 'body.md').write_text('Validation: **pending**')
+        (bundle / 'review-files/README.md').write_text('Validation: **pending**')
         (bundle / 'review-files/experiment.json').write_text('{}')
         report = {'validator_sha256': hosted_runtime.selected_profile(PROFILE)['sha256'], 'patch_sha256': 'candidate', 'source_revision': 'source', 'status': 'pass',
                   'settings': {}, 'token_ids': [[1]], 'tokenizer_sha256': 'same',
@@ -40,6 +40,7 @@ class HostedRuntimeTests(unittest.TestCase):
             bundle, cpu, target = self.fixture(root)
             result = hosted_runtime.finalize(bundle, PROFILE, cpu, target, root / 'comparison.json')
             self.assertEqual(result['status'], 'pass')
+            self.assertEqual(result['experiment_id'], 'pair-1')
             self.assertEqual(json.loads((bundle / 'metadata.json').read_text())['validation'], 'pass')
             self.assertTrue((bundle / 'review-files/runtime-validation.json').exists())
             self.assertIn('**pass**', (bundle / 'body.md').read_text())
@@ -56,7 +57,8 @@ class HostedRuntimeTests(unittest.TestCase):
                 if missing: target.unlink()
                 result = hosted_runtime.finalize(bundle, PROFILE, cpu, target, root / 'comparison.json')
                 self.assertEqual(result['status'], 'blocked')
-                self.assertEqual(json.loads((bundle / 'metadata.json').read_text())['validation'], 'skipped')
+                self.assertEqual(result['experiment_id'], 'pair-1')
+                self.assertEqual(json.loads((bundle / 'metadata.json').read_text())['validation'], 'pending')
                 self.assertFalse((bundle / 'review-files/runtime-validation.json').exists())
             (bundle / 'candidate.patch').write_text('unused')
             with self.assertRaisesRegex(ValueError, 'must pass'):

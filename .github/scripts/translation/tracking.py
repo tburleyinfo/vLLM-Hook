@@ -1,7 +1,9 @@
 """Optional W&B metadata tracking; candidate source and raw logs stay in Actions artifacts."""
+import argparse
 import hashlib
 import json
 import os
+from pathlib import Path
 
 
 def register(run, condition):
@@ -14,13 +16,16 @@ def register(run, condition):
     manifest = json.loads((run / 'manifest.json').read_text())
     protocol = json.loads((run / 'protocol.json').read_text())
     identity = os.environ.get('GITHUB_RUN_ID', run.name) + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1')
+    experiment_id = protocol.get('experiment_id', '')
     settings = wandb.Settings(disable_git=True, disable_code=True, save_code=False,
         x_disable_meta=True, x_disable_stats=True, x_disable_machine_info=True,
         console='off', silent=True, root_dir=str(run), program='repository-translation',
         program_relpath='repository-translation', host='runner', username='researcher')
     config = {'condition': condition, 'source_revision': manifest['source_revision'],
         'schema_version': protocol['schema_version'], 'translator': manifest['translator'],
-        'translation_task': manifest['translation_task'],
+        'translation_task': manifest['translation_task'], 'use_case': protocol.get('use_case', ''),
+        'experiment_id': experiment_id, 'graph_preparation_seconds': protocol.get('graph_preparation_seconds'),
+        'available_input_bytes': protocol.get('available_input_bytes', {}).get(condition),
         'target_packages': manifest['target_packages'],
         'target_environment': manifest.get('target_environment', {}), 'prompt_sha256': protocol['prompt_sha256'][condition],
         'manifest_sha256': hashlib.sha256((run / 'manifest.json').read_bytes()).hexdigest(),
@@ -29,8 +34,8 @@ def register(run, condition):
         'graph_context_sha256': hashlib.sha256(json.dumps(protocol['condition_context_files'][condition], sort_keys=True).encode()).hexdigest()}
     record = wandb.init(entity=entity, project=project,
         id=hashlib.sha256((identity + condition).encode()).hexdigest()[:16], resume='never',
-        name=identity + '-' + condition, group=identity, job_type='repository-translation',
-        tags=['pilot' if manifest['translator']['model'] == 'auto' else 'fixed-model', condition],
+        name=identity + '-' + condition, group=experiment_id or identity, job_type='repository-translation',
+        tags=[condition],
         config=config, settings=settings)
     record.summary.update({'translation_status': 'not_started', 'manual_candidate_repairs': False})
     receipt = {'path': f'{entity}/{project}/{record.id}', 'url': record.url}
@@ -46,6 +51,7 @@ def update(run, condition, row):
     remote = wandb.Api(timeout=30).run(json.loads(receipt.read_text())['path'])
     translation = row['translation']
     remote.summary.update({'translation_status': translation.get('status'),
+        'experimental_status': translation.get('experimental_status'),
         'translation_seconds': translation.get('seconds'),
         'translator_resolved': translation.get('resolved_models', []),
         'patch_sha256': translation.get('patch_sha256'),
@@ -53,3 +59,21 @@ def update(run, condition, row):
         'validation_error': row['validation'].get('error', row['validation'].get('reason')),
         'manual_candidate_repairs': False})
     remote.summary.update()
+
+
+def update_hosted_validation(receipt, result):
+    import wandb
+    remote = wandb.Api(timeout=30).run(json.loads(receipt.read_text())['path'])
+    report = json.loads(result.read_text())
+    remote.summary.update({'validation_status': report['status'],
+                           'validation_error': report.get('error'),
+                           'validator_sha256': report.get('validator_sha256')})
+    remote.summary.update()
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Record the final hosted validation outcome')
+    parser.add_argument('receipt', type=Path)
+    parser.add_argument('result', type=Path)
+    args = parser.parse_args()
+    update_hosted_validation(args.receipt, args.result)

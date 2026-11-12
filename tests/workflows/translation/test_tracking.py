@@ -24,6 +24,7 @@ class TrackingTests(unittest.TestCase):
             manifest = {'source_revision': 'a'*40, 'translator': {'model': 'auto'},
                         'translation_task': {'source_backend': 'A', 'target_backend': 'B', 'requirements': []}, 'target_packages': ['runtime']}
             protocol = {'schema_version': 1, 'prompt_sha256': {'no_graph': 'prompt-hash'},
+                        'experiment_id': 'paired-trial',
                         'shared_context_files': {'module.py': 'hash'},
                         'condition_context_files': {'no_graph': {}}}
             (run / 'manifest.json').write_text(json.dumps(manifest))
@@ -39,6 +40,7 @@ class TrackingTests(unittest.TestCase):
             self.assertNotIn('tolerance', config)
             self.assertNotIn('fixture-key', json.dumps(config))
             self.assertEqual(config['prompt_sha256'], 'prompt-hash')
+            self.assertEqual(sdk.init.call_args.kwargs['group'], 'paired-trial')
             self.assertFalse(config['manual_candidate_repairs'])
             settings = sdk.Settings.call_args.kwargs
             self.assertTrue(settings['disable_git'])
@@ -46,6 +48,18 @@ class TrackingTests(unittest.TestCase):
             self.assertTrue(settings['x_disable_meta'])
             record.finish.assert_called_once()
             self.assertEqual(json.loads((run / 'no_graph/tracking.json').read_text())['path'], 'team/project/fixture-id')
+
+    def test_hosted_result_updates_the_registered_run(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            receipt, result = [Path(temporary) / name for name in ('tracking.json', 'comparison.json')]
+            receipt.write_text(json.dumps({'path': 'team/project/fixture-id'}))
+            result.write_text(json.dumps({'status': 'blocked', 'error': 'Missing target', 'validator_sha256': 'profile-hash'}))
+            sdk = MagicMock()
+            with patch.dict(sys.modules, {'wandb': sdk}):
+                tracking.update_hosted_validation(receipt, result)
+            sdk.Api.return_value.run.assert_called_once_with('team/project/fixture-id')
+            sdk.Api.return_value.run.return_value.summary.update.assert_any_call({
+                'validation_status': 'blocked', 'validation_error': 'Missing target', 'validator_sha256': 'profile-hash'})
 
 
 if __name__ == '__main__':

@@ -105,7 +105,7 @@ def candidate_patch(candidate):
     return git("diff", "--binary", "--", ".", ":(exclude)translation_discovery/**", cwd=candidate)
 
 
-def prepare(run, manifest_path, target_site=None):
+def prepare(run, manifest_path, target_site=None, *, use_case="", experiment_id=""):
     if run.exists():
         raise ValueError(f"Run directory already exists; select a new run ID: {run}")
     manifest = json.loads(manifest_path.read_text())
@@ -118,6 +118,29 @@ def prepare(run, manifest_path, target_site=None):
         raise ValueError("Declare source/target platforms and repository behavior requirements only")
     if not isinstance(task["requirements"], list) or not all(isinstance(item, str) for item in task["requirements"]):
         raise ValueError("Repository requirements must be a list of strings")
+    use_case = use_case.strip()
+    if any(not character.isprintable() for character in use_case):
+        raise ValueError("Use case must be a single printable name")
+    experiment_id = experiment_id.strip()
+    if any(not character.isprintable() for character in experiment_id):
+        raise ValueError("Experiment ID must be a single printable label")
+    scope = (
+        f"Selected use case: {json.dumps(use_case)}.\n"
+        "Apply the migration requirements to the behavior needed by this use case. "
+        "Inspect the repository to identify that behavior and its dependencies. "
+        "You may edit shared components where needed while preserving existing behavior.\n"
+        if use_case else
+        "Implement the target backend so the repository's existing capabilities work through its public API.\n"
+    )
+    notebooks = (
+        "Provide runnable usage notes for the selected use case. Translating the full notebook collection is outside this scope.\n"
+        if use_case else
+        "Translate every existing source notebook into a NEW notebook at\n"
+        "translated_notebooks/<original repository-relative path>. Preserve original notebooks.\n"
+        "Use the translated public API and target backend, with install/setup and runnable\n"
+        "end-to-end cells matching the original use case. Clear cell outputs and execution\n"
+        "counts. These are deliverable files, not download links or documentation substitutes.\n"
+    )
     run.mkdir(parents=True)
     revision = git("rev-parse", manifest["source_revision"]).decode().strip()
     archive_hash = snapshot(revision, run / "source")
@@ -135,25 +158,19 @@ def prepare(run, manifest_path, target_site=None):
     prompt = f"""Translate this repository from {task['source_backend']} to {task['target_backend']}.
 Preserve its public APIs, observable behavior, data contracts and lifecycle behavior.
 Inspect repository code and declared target-library sources to discover the required changes.
-Translate the repository itself. No example-specific adapter, entry point, model,
-input prompt, test fixture, dependency recipe or implementation plan is supplied.
-Implement the target backend so the repository's existing capabilities work through
-its public API. Add backend implementation modules, tests and runnable usage notes
+No example-specific adapter, model, test prompts, test fixture, dependency recipe
+or implementation plan is supplied.
+{scope}Add backend implementation modules, tests and runnable usage notes
 as new files wherever practical. Make only the small integration edits needed to
 connect them to the existing API. Keep existing files, features, dependency profiles,
 pins and backend installation paths; add target dependencies alongside them.
 Do not delete or rename existing files, remove existing code to simplify the task,
 or replace required behavior with unsupported-operation errors or no-op hooks.
-Do not invent a replacement API to satisfy a hidden example.
+Use the repository's existing API.
 Write TRANSLATION.md as a new file: implemented capabilities, how to run them,
 checks actually performed, and remaining implementation work. If work is incomplete,
 record it there while retaining original behavior; unsupported is not implemented.
-Translate every existing source notebook into a NEW notebook at
-translated_notebooks/<original repository-relative path>. Preserve original notebooks.
-Use the translated public API and target backend, with install/setup and runnable
-end-to-end cells matching the original use case. Clear cell outputs and execution
-counts. These are deliverable files, not download links or documentation substitutes.
-When all implementation and notebook work is finished, write
+{notebooks}When all work required by this scope is finished, write
 translation_discovery/completion.json with {{"status":"complete","remaining_work":[]}}.
 Otherwise use status "incomplete" and list unfinished work in remaining_work.
 A completed model process alone does not mean the translation is complete.
@@ -187,7 +204,9 @@ Generation success is not evidence of runtime correctness or a graph advantage.
             "-c", "commit.gpgsign=false", "commit", "-qm", "Frozen repository source", cwd=candidate)
         (directory / "prompt.md").write_text(prompt)
         hashes[condition] = digest(prompt.encode())
-    write_json(run / "protocol.json", {"schema_version": 1, "source_revision": revision,
+    write_json(run / "protocol.json", {"schema_version": 1, "source_revision": revision, "use_case": use_case,
+        "experiment_id": experiment_id,
+        "workflow_revision": os.environ.get("GITHUB_SHA"),
         "source_archive_sha256": archive_hash, "source_files": files, "prompt_sha256": hashes,
         "translator": manifest["translator"], "experimental_status": "prepared; no graph benefit established"})
     return manifest
@@ -210,8 +229,9 @@ def generate_translation(run, condition, pilot=False):
         platform_evidence.verify_context(run, condition)
     except (ValueError, FileNotFoundError) as error:
         return {"status": "blocked", "error": str(error)}
-    if not pilot and manifest["translator"].get("model") == "auto":
-        return {"status": "blocked", "error": "Controlled runs require a fixed model; Auto is pilot-only"}
+    if not pilot and (manifest["translator"].get("fixed_model") is not True
+                      or manifest["translator"].get("model") in ("auto", "", None)):
+        return {"status": "blocked", "error": "Controlled runs require an explicit fixed model; Auto is pilot-only"}
     directory = run / condition
     if digest((directory / "prompt.md").read_bytes()) != protocol["prompt_sha256"][condition]:
         return {"status": "blocked", "error": "Frozen prompt hash changed"}
@@ -316,7 +336,7 @@ def evaluate(run, condition, profile_path, python, timeout):
     directory = run / condition
     existing = directory / "validation-result.json"
     if existing.exists():
-        if json.loads(existing.read_text()).get("status") != "skipped":
+        if json.loads(existing.read_text()).get("status") not in ("pending", "skipped"):
             raise ValueError("Validation already recorded; keep the original result or use a separate run")
         preserve_attempt(directory, ["validation-result.json"])
     delivered = materialize_evaluation_candidate(run, condition)
@@ -381,28 +401,42 @@ def main():
     parser.add_argument("--stage", choices=["run", "prepare", "discover", "retrieve", "freeze", "translate", "evaluate", "summary", "finish"], required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=PROFILE / "manifest.json")
+    parser.add_argument("--use-case", default="", help="Use case to migrate; empty keeps repository-wide scope")
+    parser.add_argument("--experiment-id", default="", help="Shared label for the two runs in an experiment pair")
     parser.add_argument("--target-site", default=os.environ.get("TRANSLATION_TARGET_SITE", ""))
     parser.add_argument("--condition", choices=["no-graph", "graph", "both"], default="no-graph")
     parser.add_argument("--pilot", action="store_true")
     parser.add_argument("--validator-profile", type=Path, help="Optional post-generation validator profile; never a translator input")
     parser.add_argument("--validation-python", default=os.environ.get("TRANSLATION_VALIDATION_PYTHON", sys.executable))
     parser.add_argument("--timeout", type=int, default=300)
-    parser.add_argument("--prepare-pr", type=Path)
+    bundle = parser.add_mutually_exclusive_group()
+    bundle.add_argument("--prepare-pr", type=Path)
+    bundle.add_argument("--prepare-runtime", type=Path)
     args = parser.parse_args()
     conditions = CONDITIONS if args.condition == "both" else (CONDITIONS[args.condition == "graph"],)
-    if args.prepare_pr and (args.stage not in ("run", "finish") or args.condition == "both"):
-        parser.error("Draft publication requires run/finish and exactly one condition")
+    if (args.prepare_pr or args.prepare_runtime) and (args.stage not in ("run", "finish") or args.condition == "both"):
+        parser.error("Candidate packaging requires run/finish and exactly one condition")
     if args.stage == "evaluate" and not args.validator_profile:
         parser.error("evaluate requires an explicit --validator-profile")
     run = args.run_dir.resolve()
     if args.validator_profile:
         check_validator_location(args.validator_profile, run)
     if args.stage in ("run", "prepare"):
-        prepare(run, args.manifest, args.target_site)
+        prepare(run, args.manifest, args.target_site, use_case=args.use_case, experiment_id=args.experiment_id)
+    elif args.use_case.strip() or args.experiment_id.strip():
+        protocol = json.loads((run / "protocol.json").read_text())
+        for field in ("use_case", "experiment_id"):
+            supplied = getattr(args, field).strip()
+            if supplied and supplied != protocol.get(field, ""):
+                parser.error(f"{field} is frozen during preparation; use a new run to change it")
     if args.stage in ("run", "discover"):
         platform_evidence.discover(run, args.target_site)
     if args.stage in ("run", "retrieve"):
+        started = time.perf_counter()
         repository_graph.write_retrieval(run)
+        protocol = json.loads((run / "protocol.json").read_text())
+        protocol["graph_preparation_seconds"] = time.perf_counter() - started
+        write_json(run / "protocol.json", protocol)
     if args.stage in ("run", "freeze"):
         platform_evidence.freeze(run)
     failed = False
@@ -422,7 +456,7 @@ def main():
                 raise ValueError("Candidate differs from its saved translation patch")
             if args.stage in ("run", "finish"):
                 output = directory / "validation-result.json"
-                if output.exists() and json.loads(output.read_text()).get("status") != "skipped":
+                if output.exists() and json.loads(output.read_text()).get("status") not in ("pending", "skipped"):
                     report = json.loads(output.read_text())
                 elif args.validator_profile:
                     try:
@@ -430,6 +464,9 @@ def main():
                     except (OSError, ValueError, subprocess.SubprocessError) as error:
                         report = {"status": "blocked", "error": str(error)}
                         write_json(output, report)
+                elif args.prepare_runtime:
+                    report = {"status": "pending", "reason": "Awaiting hosted runtime comparison"}
+                    write_json(output, report)
                 elif output.exists():
                     report = json.loads(output.read_text())
                 else:
@@ -439,15 +476,19 @@ def main():
                 if candidate_patch(directory / "candidate") != patch:
                     raise ValueError("Validation changed the original generated candidate")
                 validation = report["status"]
-                failed = failed or validation not in ("pass", "skipped")
+                failed = failed or validation not in ("pass", "skipped", "pending")
                 write_json(directory / "delivery-result.json", {"condition": args.condition, "validation": validation,
                     "patch_sha256": generation["patch_sha256"]})
-                completed = completion.check(run / 'source', directory / 'candidate')
+                protocol = json.loads((run / "protocol.json").read_text())
+                completed = completion.check(run / 'source', directory / 'candidate', use_case=protocol.get("use_case", ""))
                 write_json(directory / 'completion-result.json', completed)
                 eligible = completed['status'] == 'pass' and validation in ('pass', 'skipped')
-                failed = failed or not eligible
-                if args.prepare_pr and eligible:
+                if args.prepare_runtime and validation in ("pending", "pass", "skipped"):
+                    publish_candidate.prepare(run, condition, validation, args.prepare_runtime.resolve(), for_runtime=True)
+                elif args.prepare_pr and eligible:
                     publish_candidate.prepare(run, condition, validation, args.prepare_pr.resolve())
+                elif not eligible:
+                    failed = True
     if args.stage == "evaluate":
         for condition in conditions:
             report = evaluate(run, condition, args.validator_profile, args.validation_python, args.timeout)
