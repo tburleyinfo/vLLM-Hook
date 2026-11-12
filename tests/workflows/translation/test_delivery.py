@@ -61,7 +61,7 @@ class DeliveryTests(unittest.TestCase):
             bundle = root / 'bundle'
             bundle.mkdir()
             (bundle / 'candidate.patch').write_bytes(saved)
-            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'completion': {'status': 'pass'}, 'validation': 'skipped', 'patch_sha256': hashlib.sha256(saved).hexdigest()}))
+            (bundle / 'metadata.json').write_text(json.dumps({'condition': 'graph', 'completion': {'status': 'incomplete'}, 'validation': 'skipped', 'patch_sha256': hashlib.sha256(saved).hexdigest()}))
             (bundle / 'body.md').write_text('Validation: skipped')
             (bundle / 'review-files/discovery').mkdir(parents=True)
             (bundle / 'review-files/README.md').write_text('Experiment report\n')
@@ -101,7 +101,7 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual(git('show', pushed[0] + ':' + prefix + '/discovery/plan.md'), 'Generated plan')
             self.assertEqual(git('show', pushed[0] + ':application.py'), 'candidate')
             self.assertEqual(git('rev-parse', pushed[0] + '^'), base)
-            # Re-running a completed candidate reuses the existing draft.
+            # Re-running the same candidate reuses the existing draft.
             branch = remote_state['branch']
             with patch.object(delivery, 'command', side_effect=fake):
                 delivery.publish(bundle, 'example/project', 'main', repo)

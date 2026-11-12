@@ -23,15 +23,18 @@ Translation → Run workflow**:
 | --- | --- | --- |
 | `stage` | `run` | Prepare, discover, freeze, generate and package in one job |
 | `condition` | `no-graph` | `graph` adds extracted source/target graphs; `both` runs a pair |
-| `use_case` | Empty | Use case to migrate, such as `Attention Tracker`; empty keeps repository-wide scope |
+| `use_case` | `Attention Tracker` | Use case to migrate; clear it for repository-wide scope |
 | `experiment_id` | Empty | Shared label for the two runs in a research pair |
 | `manifest` | `.github/translation/manifest.json` | Repository revision, platforms, behavior requirements, target packages and translator settings |
 | `runtime_validation` | Unchecked | Opt in to running CPU/Metal tests on GitHub before publication |
 | `validator_profile` | Attention Tracker profile | Independent tests attached to the draft for manual execution |
-| `create_draft_pr` | Checked | Publish only complete deliverables; update the existing draft for this condition and base |
+| `create_draft_pr` | Checked | Open or update a draft for review, including incomplete patches |
 | `pr_base` | `main` | Draft destination |
 | `run_dir` | Empty | Unique directory for hosted `run`; persistent directories are for local stages |
 | `pilot` | Checked | Required for the default Auto-routed model |
+
+To try Attention Tracker once, select `main` and run with the defaults.
+The workflow opens a review draft without waiting for CPU or Metal tests.
 
 Use one condition per runtime comparison. For generation-only paired research, use
 `condition: both` with `create_draft_pr` and `runtime_validation` unchecked.
@@ -50,15 +53,17 @@ names, repository requirements and target packages to use another Python backend
 The translating model reads source files; it does not execute the target backend.
 The target platform therefore does not determine the hosted generation machine.
 
-Publication waits for completed deliverables for the selected scope. The model
-must write `translation_discovery/completion.json` declaring `status: complete` and
-an empty `remaining_work` list, plus runnable usage notes in `TRANSLATION.md`.
+A draft makes the saved patch available for review. Its description shows the
+deliverable status, remaining work and runtime validation result separately.
+The model records progress in `translation_discovery/completion.json` and usage
+notes in `TRANSLATION.md`. A completion pass requires `status: complete` and
+an empty `remaining_work` list.
 For repository-wide runs, every original notebook also needs
 a new translated counterpart under `translated_notebooks/<original path>`, with
 nonempty changed code cells and cleared outputs. These checks establish deliverable
 presence, not behavioral correctness or execution of every notebook.
 
-CPU-to-Metal runtime validation is **off by default**. Complete drafts open with
+CPU-to-Metal runtime validation is **off by default**. Drafts open with
 validation marked skipped and include the selected profile, exact patch and
 manual instructions under `translation-experiments/<condition>-<patch-sha256>/validation/`.
 The instructions show how to run the CPU reference on Linux and the candidate
@@ -67,8 +72,8 @@ while a Mac is unavailable.
 
 Checking `runtime_validation` opts in to hosted tests and requires a passing
 comparison for publication. A saved patch can reach the hosted test even when
-the translator declares incomplete deliverables. Incomplete generation still
-keeps the evidence in Actions. No manual candidate repair occurs.
+the translator declares incomplete deliverables. If generation fails to produce
+a usable patch, the evidence stays in Actions. No manual candidate repair occurs.
 
 A stable bot-owned branch is used per condition and destination branch. Subsequent
 successful runs update that draft, rather than opening one PR per attempt. Branch

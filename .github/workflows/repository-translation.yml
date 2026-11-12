@@ -23,7 +23,7 @@ on:
       use_case:
         description: Use case to migrate (for example, Attention Tracker); blank means repository-wide
         type: string
-        default: ''
+        default: Attention Tracker
       experiment_id:
         description: Shared label for the graph and no-graph runs of one pair
         type: string
@@ -36,7 +36,7 @@ on:
         type: boolean
         default: false
       create_draft_pr:
-        description: Publish completed deliverables only; reuse the draft for this condition and base
+        description: Open or update a draft for review, including incomplete patches
         type: boolean
         default: true
       pr_base:
@@ -123,7 +123,6 @@ jobs:
     timeout-minutes: 40
     outputs:
       bundle_ready: ${{ steps.bundle.outputs.ready }}
-      draft_ready: ${{ steps.bundle.outputs.draft_ready }}
       evidence_url: ${{ steps.evidence.outputs.artifact-url }}
     steps:
       - name: Checkout translation tools
@@ -238,20 +237,13 @@ jobs:
             fi
           fi
           "${TRANSLATION_PYTHON:-python3}" .github/scripts/translation/run.py "${args[@]}"
-      - name: Check candidate bundle and draft eligibility
+      - name: Check candidate bundle
         id: bundle
         if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && (inputs.create_draft_pr || inputs.runtime_validation) && !env.ACT }}
         shell: bash
         run: |
           if [[ -f "$RUNNER_TEMP/translation-pr/metadata.json" ]]; then
-            python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
-          import json, os
-          from pathlib import Path
-          path = Path(os.environ['RUNNER_TEMP']) / 'translation-pr/metadata.json'
-          metadata = json.loads(path.read_text())
-          print('ready=true')
-          print('draft_ready=' + str(metadata['completion']['status'] == 'pass').lower())
-          PYTHON
+            echo 'ready=true' >> "$GITHUB_OUTPUT"
           fi
       - name: Upload selected candidate
         if: ${{ always() && steps.bundle.outputs.ready == 'true' }}
@@ -383,14 +375,14 @@ jobs:
             python3 .github/scripts/translation/tracking.py "$receipt" "$result"
           fi
       - uses: actions/upload-artifact@v4
-        if: ${{ steps.compare.outputs.ready == 'true' && needs.experiment.outputs.draft_ready == 'true' && inputs.create_draft_pr }}
+        if: ${{ steps.compare.outputs.ready == 'true' && inputs.create_draft_pr }}
         with:
           name: translation-validated-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/translation-pr/
 
   publish:
     needs: [experiment, runtime-compare]
-    if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && inputs.create_draft_pr && inputs.condition != 'both' && needs.experiment.result == 'success' && needs.experiment.outputs.draft_ready == 'true' && (!inputs.runtime_validation || needs.runtime-compare.outputs.ready == 'true') }}
+    if: ${{ always() && (inputs.stage == 'finish' || inputs.stage == 'run') && inputs.create_draft_pr && inputs.condition != 'both' && needs.experiment.result == 'success' && needs.experiment.outputs.bundle_ready == 'true' && (!inputs.runtime_validation || needs.runtime-compare.outputs.ready == 'true') }}
     concurrency:
       group: translation-publish-${{ inputs.pr_base }}-${{ inputs.condition }}
       cancel-in-progress: false
@@ -404,7 +396,7 @@ jobs:
         with:
           name: ${{ inputs.runtime_validation && 'translation-validated' || 'translation-pr' }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/translation-pr
-      - name: Open or update the completed translation draft
+      - name: Open or update the translation draft
         env:
           GH_TOKEN: ${{ github.token }}
           PR_BASE: ${{ inputs.pr_base }}

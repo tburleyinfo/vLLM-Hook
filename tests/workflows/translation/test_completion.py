@@ -1,4 +1,4 @@
-"""Prevent early publication when implementation or notebook deliverables are missing."""
+"""Report missing implementation and notebook deliverables separately from runtime validation."""
 import json
 from pathlib import Path
 import sys

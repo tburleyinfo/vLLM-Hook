@@ -10,9 +10,12 @@ def notebook_outputs(source):
 
 def check(source, candidate, *, use_case=''):
     errors = []
+    remaining_work = []
     declaration = candidate / 'translation_discovery/completion.json'
     try:
         declared = json.loads(declaration.read_text())
+        if isinstance(declared, dict) and isinstance(declared.get('remaining_work'), list):
+            remaining_work = [item for item in declared['remaining_work'] if isinstance(item, str) and item.strip()]
         if not isinstance(declared, dict) or declared.get('status') != 'complete' or declared.get('remaining_work') != []:
             errors.append('Translator did not declare completed implementation with no remaining work')
     except (OSError, ValueError):
@@ -36,6 +39,6 @@ def check(source, candidate, *, use_case=''):
                 raise ValueError('Notebook code was copied unchanged')
         except (OSError, ValueError, AttributeError, TypeError) as error:
             errors.append(f'{output}: {error}')
-    return {'status': 'pass' if not errors else 'incomplete', 'errors': errors,
+    return {'status': 'pass' if not errors else 'incomplete', 'errors': errors, 'remaining_work': remaining_work,
             'notebooks': notebooks, 'use_case': use_case,
             'scope': 'Translator completion declaration and required deliverables; runtime validation is separate'}
