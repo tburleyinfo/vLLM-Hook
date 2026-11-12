@@ -1,0 +1,450 @@
+diff --git a/TRANSLATION.md b/TRANSLATION.md
+new file mode 100644
+index 0000000..e2e6dec
+--- /dev/null
++++ b/TRANSLATION.md
+@@ -0,0 +1,38 @@
++# vLLM-Metal translation: Attention Tracker
++
++## Implemented
++
++- Added the `metal` optional dependency profile without changing the existing
++  CPU/CUDA profiles, base pins, or installation paths.
++- Added a Metal-specific Q/K observer for the MLX SDPA boundary. It captures
++  actual Q/K values from vLLM-Metal model execution (not a separate MLX
++  generation path), returns them in the existing `probes["config"]` and
++  `probes["qk_cache"]` format, and attaches them to `MiaLLM.generate()` output.
++- Kept analysis on the existing `AttntrackerAnalyzer` and `MiaLLM.analyze()`
++  APIs.
++- Added unit tests for the Q/K probe contract and runnable Attention Tracker
++  usage notes in `examples/README_vllm_metal_attention.md`.
++
++## Checks performed
++
++- Added tests; they are runnable with
++  `pytest -q tests/use_cases/test_vllm_metal_attention.py`.
++- Tests were not executed in this environment.
++- Inspected the repository's Q/K worker, analyzer, probe schema, example and
++  supplied vLLM-Metal attention/model-runner sources.
++- No Apple Silicon runtime or vLLM-Metal generation test was run in this
++  environment.
++
++## Remaining implementation work
++
++- Verify worker-extension RPC installation and end-to-end capture against the
++  declared vLLM-Metal runtime on Apple Silicon. In particular, verify real
++  batching/prompt ordering and model lifecycle integration.
++- Implement correct association/reconstruction for chunked prefill, since
++  segmented prefill needs request identifiers and complete prefix keys.
++- Integrate persistent (`save_to_disk`) delivery and the served `MiaClient`
++  path with Metal worker lifecycle.
++- Port Metal-compatible steering, hidden-state capture, and other worker
++  modes; they remain on their existing CPU/CUDA implementations.
++- Validate the shipped Granite prompt offsets, the selected Qwen2 configuration,
++  analyzer scores, and public lifecycle behavior on actual Metal hardware.
+diff --git a/examples/README_vllm_metal_attention.md b/examples/README_vllm_metal_attention.md
+new file mode 100644
+index 0000000..8a75627
+--- /dev/null
++++ b/examples/README_vllm_metal_attention.md
+@@ -0,0 +1,28 @@
++# Attention Tracker with vLLM-Metal
++
++Run on an Apple Silicon Mac with a compatible vLLM-Metal environment. The
++repository's CPU and CUDA extras remain unchanged; select the new `metal`
++extra when installing this project.
++
++```bash
++uv sync --extra metal --group test
++export VLLM_ENABLE_V1_MULTIPROCESSING=0
++export VLLM_METAL_USE_PAGED_ATTENTION=0
++export VLLM_METAL_MEMORY_FRACTION=auto
++export VLLM_PLUGINS=metal
++export MIA_DEMO_MODEL=Qwen/Qwen2-1.5B-Instruct
++python examples/demo_attntracker.py
++```
++
++The demo still calls `MiaLLM.generate()` for real vLLM generation and
++`MiaLLM.analyze()` for scoring. The Metal Q/K bridge observes the MLX
++`scaled_dot_product_attention` call and supplies the same `qk_cache` probe
++shape consumed by `AttntrackerAnalyzer`. Keep `VLLM_ENABLE_V1_MULTIPROCESSING=0`
++so the in-process capture collector can observe the model execution.
++
++This path is intended for ordinary full-prompt SDPA prefill. Chunked prompt
++prefill, non-SDPA attention families, `save_to_disk`, served `MiaClient`,
++steering, and other capture workers are not translated yet. The shipped
++example's default Granite checkpoint and model-specific token offsets should
++not be assumed to have been validated on Metal; the Qwen2 example config is
++provided as an alternate model selection.
+diff --git a/mia/backends/__init__.py b/mia/backends/__init__.py
+new file mode 100644
+index 0000000..1acfb23
+--- /dev/null
++++ b/mia/backends/__init__.py
+@@ -0,0 +1 @@
++"""Backend-specific integrations for MIA."""
+diff --git a/mia/backends/vllm_metal_attention.py b/mia/backends/vllm_metal_attention.py
+new file mode 100644
+index 0000000..c75b2a5
+--- /dev/null
++++ b/mia/backends/vllm_metal_attention.py
+@@ -0,0 +1,177 @@
++"""Attention Tracker capture bridge for vLLM-Metal's MLX attention path."""
++from __future__ import annotations
++
++import contextlib
++import threading
++from typing import Any
++
++import torch
++
++
++_PATCH_LOCK = threading.RLock()
++_GENERATE_LOCK = threading.RLock()
++_ACTIVE_CAPTURE = None
++_ACTIVE_LAYER = threading.local()
++_PATCHED_CLASSES: set[type] = set()
++_PATCHED_GLOBALS: set[int] = set()
++_INSTANCE_LAYERS: dict[int, tuple[int, Any]] = {}
++_ORIGINAL_CALLS: dict[type, Any] = {}
++
++
++class AttentionCapture:
++    """Collect per-prompt last-query Q and full K tensors in the public probe schema."""
++
++    def __init__(self, prompt_count: int) -> None:
++        self.prompt_count = int(prompt_count)
++        self._layers: dict[int, dict[str, Any]] = {}
++
++    def record(self, layer_num: int, q: torch.Tensor, k: torch.Tensor, scale: float) -> None:
++        if q.ndim != 4 or k.ndim != 4:
++            raise ValueError(f"Metal attention Q/K must be [batch, heads, seq, dim], got "
++                             f"{tuple(q.shape)} and {tuple(k.shape)}")
++
++        layer = self._layers.setdefault(
++            int(layer_num),
++            {"q": [], "k_all": [], "scale": float(scale), "q_heads": int(q.shape[1]),
++             "kv_heads": int(k.shape[1]), "head_dim": int(q.shape[3])},
++        )
++        remaining = self.prompt_count - len(layer["q"])
++        if remaining <= 0:
++            return
++        n = min(remaining, int(q.shape[0]), int(k.shape[0]))
++        for i in range(n):
++            query = q[i, :, -1, :].reshape(-1).detach().cpu().contiguous()
++            keys = k[i].permute(1, 0, 2).reshape(k.shape[2], -1).detach().cpu().contiguous()
++            layer["q"].append(query)
++            layer["k_all"].append(keys)
++
++    def probes(self, layer_names: dict[int, str]) -> dict:
++        if not self._layers:
++            raise RuntimeError("vLLM-Metal Attention Tracker did not observe any attention Q/K")
++        incomplete = [
++            layer for layer in layer_names
++            if layer not in self._layers or len(self._layers[layer]["q"]) != self.prompt_count
++        ]
++        if incomplete:
++            raise RuntimeError(
++                "vLLM-Metal Attention Tracker could not capture every prompt for layer(s) "
++                f"{incomplete}; ensure each prompt is processed as a full prefill."
++            )
++
++        qk_cache = {}
++        q_heads = kv_heads = head_dim = scale = None
++        for layer_num, name in layer_names.items():
++            item = self._layers[layer_num]
++            q_heads = item["q_heads"]
++            kv_heads = item["kv_heads"]
++            head_dim = item["head_dim"]
++            scale = item["scale"]
++            qk_cache[name] = {
++                "q": item["q"],
++                "k_all": item["k_all"],
++                "layer_num": layer_num,
++                "hookq_mode": "last_token",
++            }
++        return {
++            "config": {
++                "num_attention_heads": q_heads,
++                "num_key_value_heads": kv_heads,
++                "head_dim": head_dim,
++                "attention_multiplier": scale,
++            },
++            "qk_cache": qk_cache,
++        }
++
++
++def _mlx_array_to_cpu_tensor(value) -> torch.Tensor:
++    from vllm_metal.pytorch_backend.tensor_bridge import mlx_to_torch
++
++    return mlx_to_torch(value, device="cpu").detach().contiguous()
++
++
++def _wrap_sdpa(original):
++    def observe(*args, **kwargs):
++        active = _ACTIVE_CAPTURE
++        layer_num = getattr(_ACTIVE_LAYER, "layer_num", None)
++        if active is not None and layer_num is not None:
++            q = args[0] if args else kwargs.get("queries")
++            k = args[1] if len(args) > 1 else kwargs.get("keys")
++            scale = args[4] if len(args) > 4 else kwargs.get("scale")
++            if q is None or k is None or scale is None:
++                raise RuntimeError(
++                    "Unrecognized MLX scaled_dot_product_attention call signature"
++                )
++            active.record(int(layer_num), _mlx_array_to_cpu_tensor(q),
++                          _mlx_array_to_cpu_tensor(k), float(scale))
++        return original(*args, **kwargs)
++
++    return observe
++
++
++def _patch_attention_module(layer_num: int, module) -> None:
++    cls = type(module)
++    with _PATCH_LOCK:
++        _INSTANCE_LAYERS[id(module)] = (layer_num, module)
++        if cls not in _PATCHED_CLASSES:
++            original_call = cls.__call__
++            _ORIGINAL_CALLS[cls] = original_call
++
++            def wrapped_call(self, *args, **kwargs):
++                entry = _INSTANCE_LAYERS.get(id(self))
++                if entry is None or entry[1] is not self:
++                    return original_call(self, *args, **kwargs)
++                previous = getattr(_ACTIVE_LAYER, "layer_num", None)
++                _ACTIVE_LAYER.layer_num = entry[0]
++                try:
++                    return original_call(self, *args, **kwargs)
++                finally:
++                    if previous is None:
++                        try:
++                            del _ACTIVE_LAYER.layer_num
++                        except AttributeError:
++                            pass
++                    else:
++                        _ACTIVE_LAYER.layer_num = previous
++
++            cls.__call__ = wrapped_call
++            _PATCHED_CLASSES.add(cls)
++
++        namespace = getattr(_ORIGINAL_CALLS[cls], "__globals__", {})
++        original_sdpa = namespace.get("scaled_dot_product_attention")
++        if callable(original_sdpa) and id(namespace) not in _PATCHED_GLOBALS:
++            namespace["scaled_dot_product_attention"] = _wrap_sdpa(original_sdpa)
++            _PATCHED_GLOBALS.add(id(namespace))
++
++
++def install(model) -> dict[int, str]:
++    """Patch the loaded Metal model's ordinary MLX SDPA calls without changing their results."""
++    from vllm_metal.attention.patching import find_attn_attr, find_layers
++
++    layers = find_layers(model)
++    names = {}
++    for layer_num, layer in enumerate(layers):
++        attr = find_attn_attr(layer)
++        if attr is None:
++            continue
++        attention = getattr(layer, attr)
++        if not all(hasattr(attention, name) for name in ("q_proj", "k_proj")):
++            continue
++        _patch_attention_module(layer_num, attention)
++        names[layer_num] = f"model.layers.{layer_num}.self_attn.attn"
++    if not names:
++        raise RuntimeError("No compatible SDPA attention modules found in the vLLM-Metal model")
++    return names
++
++
++@contextlib.contextmanager
++def capture(prompt_count: int):
++    """Enable capture around a normal vLLM generation call."""
++    global _ACTIVE_CAPTURE
++    collector = AttentionCapture(prompt_count)
++    with _GENERATE_LOCK:
++        previous = _ACTIVE_CAPTURE
++        _ACTIVE_CAPTURE = collector
++        try:
++            yield collector
++        finally:
++            _ACTIVE_CAPTURE = previous
+diff --git a/mia/llm.py b/mia/llm.py
+index 4eb8ee6..39e6dab 100644
+--- a/mia/llm.py
++++ b/mia/llm.py
+@@ -1,5 +1,6 @@
+ """MiaLLM: a vllm.LLM wrapper that arms MIA capture or steering and runs analyzers."""
+ import copy
++import contextlib
+ import os
+ import json
+ import uuid
+@@ -148,6 +149,9 @@ class MiaLLM:
+ 
+         self.tokenizer = self.llm.get_tokenizer()
+         self.llm_engine = self.llm.llm_engine
++        self._metal_qk_layer_names = None
++        if self.worker_name == "capture_qk" and self._metal_plugin_enabled():
++            self._metal_qk_layer_names = self._install_metal_qk_capture()
+ 
+         self._model_dims = None
+         try:
+@@ -167,6 +171,29 @@ class MiaLLM:
+             self._analyzer_accepts = getattr(analyzer_cls, "ACCEPTS", "qk")
+             self.analyzer = analyzer_cls(self._hook_dir, self.layer_to_heads)
+ 
++    @staticmethod
++    def _metal_plugin_enabled() -> bool:
++        plugins = {item.strip().lower() for item in os.environ.get("VLLM_PLUGINS", "").split(",")}
++        return "metal" in plugins
++
++    def _install_metal_qk_capture(self):
++        rpc = getattr(self.llm_engine, "collective_rpc", None)
++        if not callable(rpc):
++            core = getattr(self.llm_engine, "engine_core", None)
++            rpc = getattr(core, "collective_rpc", None)
++        if not callable(rpc):
++            raise RuntimeError(
++                "vLLM-Metal Attention Tracker needs the in-process worker RPC interface "
++                "(set VLLM_ENABLE_V1_MULTIPROCESSING=0)."
++            )
++        installed = rpc("mia_install_metal_attention_tracker")
++        if isinstance(installed, dict):
++            return installed
++        if not isinstance(installed, (list, tuple)) or not installed:
++            raise RuntimeError("vLLM-Metal did not return its installed Q/K attention layers")
++        if not isinstance(installed[0], dict):
++            raise RuntimeError("vLLM-Metal returned an invalid installed Q/K layer map")
++        return installed[0]
+ 
+     def load_config(self, config_file: str):
+         """Load worker settings (important heads, Q/K mode, steering, HS layers) from JSON."""
+@@ -350,11 +377,21 @@ class MiaLLM:
+                                     "repetition_penalty")}
+         PROF.incr("miallm.generate.calls")
+         PROF.gauge("miallm.prompts", len(prompts))
+-        with PROF.timed("miallm.generate"):
+-            if all(sp is sp_list[0] for sp in sp_list):
+-                outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+-            else:
+-                outputs = self.llm.generate(prompts, sp_list, **passthrough)
++        metal_capture = (
++            hook and self._metal_qk_layer_names is not None and not save_to_disk
++        )
++        capture_ctx = contextlib.nullcontext(None)
++        if metal_capture:
++            from mia.backends.vllm_metal_attention import capture
++            capture_ctx = capture(len(prompts))
++        with capture_ctx as metal_collector:
++            with PROF.timed("miallm.generate"):
++                if all(sp is sp_list[0] for sp in sp_list):
++                    outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
++                else:
++                    outputs = self.llm.generate(prompts, sp_list, **passthrough)
++        if metal_collector is not None:
++            outputs[0].probes = metal_collector.probes(self._metal_qk_layer_names)
+ 
+         if hook and self.worker_name and not save_to_disk:
+             # lazy: keep mia.core.delivery out of import mia
+@@ -409,4 +446,3 @@ class MiaLLM:
+             self.close()
+         except Exception:
+             pass
+-
+diff --git a/mia/workers/qk_capture_worker.py b/mia/workers/qk_capture_worker.py
+index 50072ca..b84f320 100644
+--- a/mia/workers/qk_capture_worker.py
++++ b/mia/workers/qk_capture_worker.py
+@@ -304,6 +304,16 @@ def _marshal_perreq_qk(per_layer: dict, conf: dict, hookq_mode: str, shard=None,
+ class QKCaptureWorker:
+     """Mixin injected into vLLM's GPU Worker via worker_extension_cls."""
+ 
++    def mia_install_metal_attention_tracker(self):
++        """Install the Attention Tracker observer on a vLLM-Metal model."""
++        model = getattr(self.model_runner, "model", None)
++        if model is None:
++            raise RuntimeError("vLLM-Metal model is not loaded; cannot install Q/K capture")
++        from mia.backends.vllm_metal_attention import install
++
++        self._mia_metal_qk_layer_names = install(model)
++        return self._mia_metal_qk_layer_names
++
+     if TYPE_CHECKING:
+         model_runner: Any
+         rank: int
+@@ -1045,4 +1055,3 @@ class QKCaptureWorker:
+         # lazy: keep mia.core.delivery out of import mia
+         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
+         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
+-
+diff --git a/pyproject.toml b/pyproject.toml
+index 028c317..94d47a1 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -33,6 +33,11 @@ cuda = [
+     "vllm==0.29.0",
+     "zstandard==0.25.0",
+ ]
++metal = [
++    "vllm-metal",
++    "mlx",
++    "mlx-lm",
++]
+ 
+ [dependency-groups]
+ test = ["pytest"]
+@@ -61,6 +66,8 @@ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854
+ # These profiles are deliberately separate, even on a CUDA-capable CPU host.
+ conflicts = [
+     [{ extra = "cpu" }, { extra = "cuda" }],
++    [{ extra = "metal" }, { extra = "cpu" }],
++    [{ extra = "metal" }, { extra = "cuda" }],
+ ]
+ 
+ [tool.uv.sources]
+diff --git a/tests/use_cases/test_vllm_metal_attention.py b/tests/use_cases/test_vllm_metal_attention.py
+new file mode 100644
+index 0000000..92243f9
+--- /dev/null
++++ b/tests/use_cases/test_vllm_metal_attention.py
+@@ -0,0 +1,42 @@
++import pytest
++import torch
++
++from mia.backends.vllm_metal_attention import AttentionCapture
++
++
++def test_attention_capture_keeps_probe_tensor_contract():
++    capture = AttentionCapture(prompt_count=2)
++    queries = torch.arange(2 * 2 * 3 * 4, dtype=torch.float32).reshape(2, 2, 3, 4)
++    keys = torch.arange(2 * 1 * 3 * 4, dtype=torch.float32).reshape(2, 1, 3, 4)
++
++    capture.record(4, queries, keys, 0.5)
++    probes = capture.probes({4: "model.layers.4.self_attn.attn"})
++
++    entry = probes["qk_cache"]["model.layers.4.self_attn.attn"]
++    assert entry["layer_num"] == 4
++    assert entry["hookq_mode"] == "last_token"
++    assert len(entry["q"]) == len(entry["k_all"]) == 2
++    assert entry["q"][0].shape == (8,)
++    torch.testing.assert_close(entry["q"][0], queries[0, :, -1, :].reshape(-1))
++    assert entry["k_all"][0].shape == (3, 4)
++    assert probes["config"] == {
++        "num_attention_heads": 2,
++        "num_key_value_heads": 1,
++        "head_dim": 4,
++        "attention_multiplier": 0.5,
++    }
++
++
++def test_attention_capture_refuses_incomplete_prompt_layer_set():
++    capture = AttentionCapture(prompt_count=2)
++    capture.record(0, torch.ones(1, 1, 2, 4), torch.ones(1, 1, 2, 4), 0.5)
++
++    with pytest.raises(RuntimeError, match="full prefill"):
++        capture.probes({0: "model.layers.0.self_attn.attn"})
++
++
++def test_attention_capture_requires_sdpa_qk_shape():
++    capture = AttentionCapture(prompt_count=1)
++
++    with pytest.raises(ValueError, match="batch, heads, seq, dim"):
++        capture.record(0, torch.ones(2, 4), torch.ones(2, 4), 0.5)

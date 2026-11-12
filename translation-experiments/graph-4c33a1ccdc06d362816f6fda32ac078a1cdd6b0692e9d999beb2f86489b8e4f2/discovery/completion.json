@@ -1,0 +1,1 @@
+{"status":"incomplete","remaining_work":["Verify Metal worker-extension RPC installation and end-to-end Q/K capture on Apple Silicon.","Preserve exact request association for batching and implement chunked-prefill key reconstruction.","Integrate Metal save-to-disk and served MiaClient delivery.","Port and validate Metal steering, hidden-state capture, and remaining workers."]}

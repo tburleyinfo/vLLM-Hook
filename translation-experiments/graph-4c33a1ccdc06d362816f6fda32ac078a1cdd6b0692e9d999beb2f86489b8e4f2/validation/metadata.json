@@ -1,0 +1,26 @@
+{
+  "condition": "graph",
+  "patch_sha256": "4c33a1ccdc06d362816f6fda32ac078a1cdd6b0692e9d999beb2f86489b8e4f2",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "validation": "skipped",
+  "pilot": true,
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Verify Metal worker-extension RPC installation and end-to-end Q/K capture on Apple Silicon.",
+      "Preserve exact request association for batching and implement chunked-prefill key reconstruction.",
+      "Integrate Metal save-to-disk and served MiaClient delivery.",
+      "Port and validate Metal steering, hidden-state capture, and remaining workers."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "experiment_id": "",
+  "use_case": "Attention Tracker",
+  "runtime_validation_required": false,
+  "validator_sha256": "a96dd7b92f17f75f2d491f8d17d5057d68f43e2ece76c3275a12b78efdaf527c"
+}
