@@ -29,12 +29,12 @@ on:
         type: string
         default: ''
       validator_profile:
-        description: Independent CPU/Metal runtime validation profile
+        description: Independent test profile to attach to the draft for manual validation
         default: .github/translation-validators/attention_tracker/profile.json
       runtime_validation:
-        description: Require CPU versus Mac/Metal runtime comparison before publishing
+        description: Opt in to running the CPU and Metal tests in GitHub before publishing
         type: boolean
-        default: true
+        default: false
       create_draft_pr:
         description: Publish completed deliverables only; reuse the draft for this condition and base
         type: boolean
@@ -229,6 +229,7 @@ jobs:
           if [[ "$TRANSLATION_PILOT" == "true" ]]; then args+=(--pilot); fi
           if [[ -n "$TRANSLATION_TARGET_SITE" ]]; then args+=(--target-site "$TRANSLATION_TARGET_SITE"); fi
           if [[ "${ACT:-}" == "true" && "$RUNTIME_VALIDATION" == "true" && -n "$VALIDATOR_PROFILE" ]]; then args+=(--validator-profile "$VALIDATOR_PROFILE"); fi
+          if [[ "$CREATE_DRAFT" == "true" && -n "$VALIDATOR_PROFILE" ]]; then args+=(--attach-validator "$VALIDATOR_PROFILE"); fi
           if [[ "$TRANSLATION_STAGE" == "run" || "$TRANSLATION_STAGE" == "finish" ]]; then
             if [[ "${ACT:-}" != "true" && "$RUNTIME_VALIDATION" == "true" ]]; then
               args+=(--prepare-runtime "$RUNNER_TEMP/translation-pr")

@@ -29,7 +29,8 @@ class GenericWorkflowTests(unittest.TestCase):
         (self.repo / 'application.py').write_text('def start(value):\n    return finish(value)\ndef finish(value):\n    return value\n')
         # Even when committed alongside source, hidden validators and workflow tools must be withheld.
         for name in ('.github/translation-validators/secret/fixture.py', '.github/scripts/translation/internal.py',
-                     '.github/translation/private.json', 'tests/workflows/translation/internal.py'):
+                     '.github/translation/private.json', 'tests/workflows/translation/internal.py',
+                     'translation-experiments/old/validation/profile/fixture.py'):
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('PRIVATE_VALIDATOR_SENTINEL = True\n')
@@ -59,7 +60,7 @@ class GenericWorkflowTests(unittest.TestCase):
         runner.platform_evidence.freeze(run)
         return run
 
-    def invoke(self, name, validator=None, expect_failure=False, generator=generate_fixture, *, hosted=False):
+    def invoke(self, name, validator=None, expect_failure=False, generator=generate_fixture, *, hosted=False, attachment=None):
         run, bundle = self.root / name, self.root / (name + '-bundle')
         args = ['run.py', '--stage', 'run', '--run-dir', str(run), '--manifest', str(self.manifest_path),
                 '--target-site', str(self.site), '--condition', 'graph', '--pilot',
@@ -68,6 +69,8 @@ class GenericWorkflowTests(unittest.TestCase):
             args += ['--use-case', 'Search Results', '--experiment-id', 'search-pair-1']
         if validator:
             args += ['--validator-profile', str(validator)]
+        if attachment:
+            args += ['--attach-validator', str(attachment)]
         with patch('sys.argv', args), patch.object(runner, 'translate', side_effect=generator):
             if expect_failure:
                 with self.assertRaises(SystemExit) as caught:
@@ -142,6 +145,28 @@ class GenericWorkflowTests(unittest.TestCase):
         self.assertTrue((delivered / 'smoke_translation_fixture.py').exists())
         self.assertFalse((delivered / 'translation_discovery').exists())
         self.assertNotIn(b'translation_discovery', (bundle / 'candidate.patch').read_bytes())
+
+    def test_manual_validator_is_attached_after_generation_without_execution(self):
+        profile = runner.PROFILE.parent / 'translation-validators/attention_tracker/profile.json'
+        with patch.object(runner, 'evaluate', side_effect=AssertionError('Validator must not execute')):
+            run, bundle = self.invoke('manual-validator', attachment=profile)
+        kit = bundle / 'review-files/validation'
+        self.assertEqual((kit / 'candidate.patch').read_bytes(), (run / 'graph/translation.patch').read_bytes())
+        self.assertEqual((kit / 'profile/fixture.py').read_bytes(), (profile.parent / 'fixture.py').read_bytes())
+        self.assertIn('validation/README.md', (bundle / 'body.md').read_text())
+        self.assertFalse((run / 'graph/candidate/validation').exists())
+        metadata = json.loads((kit / 'metadata.json').read_text())
+        self.assertEqual(metadata['validation'], 'skipped')
+        report = {'status': 'pass', 'settings': {}, 'scores': [0.5],
+                  **{key: metadata[key] for key in ('source_revision', 'patch_sha256', 'validator_sha256')}}
+        cpu, target, comparison = [self.root / name for name in ('cpu.json', 'target.json', 'comparison.json')]
+        runner.write_json(cpu, {**report, 'backend': 'cpu'})
+        runner.write_json(target, {**report, 'backend': 'target'})
+        subprocess.run([sys.executable, '-B', str(kit / 'hosted_runtime.py'), '--bundle', str(kit),
+                        '--profile', str(kit / 'profile/profile.json'), '--cpu', str(cpu),
+                        '--target', str(target), '--output', str(comparison)], check=True)
+        self.assertEqual(json.loads(comparison.read_text())['status'], 'pass')
+        self.assertEqual(json.loads((kit / 'metadata.json').read_text()), metadata)
 
     def test_incomplete_implementation_keeps_evidence_without_draft(self):
         def incomplete(run, condition, pilot):

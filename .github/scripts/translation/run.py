@@ -90,7 +90,8 @@ def snapshot(revision, destination):
         archive.extractall(destination, filter="data")
     # Workflow infrastructure and optional validators are never translation inputs.
     excluded = (".github/scripts/translation", ".github/translation", ".github/translation-validators",
-                ".github/workflows/repository-translation.yml", "tests/workflows/translation")
+                ".github/workflows/repository-translation.yml", "tests/workflows/translation",
+                "translation-experiments")
     for name in excluded:
         path = destination / name
         if path.is_symlink() or path.is_file():
@@ -407,6 +408,7 @@ def main():
     parser.add_argument("--condition", choices=["no-graph", "graph", "both"], default="no-graph")
     parser.add_argument("--pilot", action="store_true")
     parser.add_argument("--validator-profile", type=Path, help="Optional post-generation validator profile; never a translator input")
+    parser.add_argument("--attach-validator", type=Path, help="Package a trusted validator with the draft without running it")
     parser.add_argument("--validation-python", default=os.environ.get("TRANSLATION_VALIDATION_PYTHON", sys.executable))
     parser.add_argument("--timeout", type=int, default=300)
     bundle = parser.add_mutually_exclusive_group()
@@ -416,6 +418,8 @@ def main():
     conditions = CONDITIONS if args.condition == "both" else (CONDITIONS[args.condition == "graph"],)
     if (args.prepare_pr or args.prepare_runtime) and (args.stage not in ("run", "finish") or args.condition == "both"):
         parser.error("Candidate packaging requires run/finish and exactly one condition")
+    if args.attach_validator and not (args.prepare_pr or args.prepare_runtime):
+        parser.error("Attaching a validator requires candidate packaging")
     if args.stage == "evaluate" and not args.validator_profile:
         parser.error("evaluate requires an explicit --validator-profile")
     run = args.run_dir.resolve()
@@ -470,7 +474,8 @@ def main():
                 elif output.exists():
                     report = json.loads(output.read_text())
                 else:
-                    report = {"status": "skipped", "reason": "No validator selected"}
+                    reason = "Validator attached for manual execution" if args.attach_validator else "No validator selected"
+                    report = {"status": "skipped", "reason": reason}
                     write_json(output, report)
                 platform_evidence.verify_context(run, condition)
                 if candidate_patch(directory / "candidate") != patch:
@@ -484,9 +489,11 @@ def main():
                 write_json(directory / 'completion-result.json', completed)
                 eligible = completed['status'] == 'pass' and validation in ('pass', 'skipped')
                 if args.prepare_runtime and validation in ("pending", "pass", "skipped"):
-                    publish_candidate.prepare(run, condition, validation, args.prepare_runtime.resolve(), for_runtime=True)
+                    publish_candidate.prepare(run, condition, validation, args.prepare_runtime.resolve(),
+                                              for_runtime=True, validator_profile=args.attach_validator)
                 elif args.prepare_pr and eligible:
-                    publish_candidate.prepare(run, condition, validation, args.prepare_pr.resolve())
+                    publish_candidate.prepare(run, condition, validation, args.prepare_pr.resolve(),
+                                              validator_profile=args.attach_validator)
                 elif not eligible:
                     failed = True
     if args.stage == "evaluate":

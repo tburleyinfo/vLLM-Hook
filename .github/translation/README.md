@@ -26,8 +26,8 @@ Translation → Run workflow**:
 | `use_case` | Empty | Use case to migrate, such as `Attention Tracker`; empty keeps repository-wide scope |
 | `experiment_id` | Empty | Shared label for the two runs in a research pair |
 | `manifest` | `.github/translation/manifest.json` | Repository revision, platforms, behavior requirements, target packages and translator settings |
-| `runtime_validation` | Checked | Require independent CPU/Mac-Metal comparison before publication |
-| `validator_profile` | Attention Tracker profile | Post-generation comparison settings; never a translation input |
+| `runtime_validation` | Unchecked | Opt in to running CPU/Metal tests on GitHub before publication |
+| `validator_profile` | Attention Tracker profile | Independent tests attached to the draft for manual execution |
 | `create_draft_pr` | Checked | Publish only complete deliverables; update the existing draft for this condition and base |
 | `pr_base` | `main` | Draft destination |
 | `run_dir` | Empty | Unique directory for hosted `run`; persistent directories are for local stages |
@@ -38,8 +38,10 @@ Use one condition per runtime comparison. For generation-only paired research, u
 For the first Attention Tracker pair, dispatch once with `condition: no-graph`
 and once with `condition: graph`. Use the same unique `experiment_id`, workflow
 revision, manifest, `use_case: Attention Tracker` and validator profile. Keep
-`runtime_validation` on and `create_draft_pr` off. Record the run order and keep
-both outcomes. For a controlled pair, select a manifest with an explicit
+`runtime_validation` off and `create_draft_pr` on. Run the attached validator
+for each draft when an Apple Silicon Mac is available. Record the run order and
+keep both outcomes, including attempts that do not produce a draft. For a
+controlled pair, select a manifest with an explicit
 model, `fixed_model: true`, and matching settings for both runs, then turn
 `pilot` off. The default Auto manifest is suitable for a pilot.
 The default manifest describes vLLM CPU/CUDA → vLLM-Metal on Apple Silicon,
@@ -56,14 +58,17 @@ a new translated counterpart under `translated_notebooks/<original path>`, with
 nonempty changed code cells and cleared outputs. These checks establish deliverable
 presence, not behavioral correctness or execution of every notebook.
 
-CPU-to-Metal runtime validation is **on by default**. After generation, separate
-read-only jobs provision the source CPU baseline on Ubuntu and the candidate on
-Apple Silicon macOS. A saved patch can reach runtime validation even when the
-translator declares incomplete deliverables. A draft still requires both
-complete deliverables and a passing comparison.
-Turning `runtime_validation` off permits a complete but explicitly unvalidated draft.
-Incomplete generation, failed/blocked validation, and missing runtime hardware
-keep the evidence in Actions and do not open a PR. No manual candidate repair occurs.
+CPU-to-Metal runtime validation is **off by default**. Complete drafts open with
+validation marked skipped and include the selected profile, exact patch and
+manual instructions under `translation-experiments/<condition>-<patch-sha256>/validation/`.
+The instructions show how to run the CPU reference on Linux and the candidate
+on Apple Silicon, then compare the saved reports. Draft creation can proceed
+while a Mac is unavailable.
+
+Checking `runtime_validation` opts in to hosted tests and requires a passing
+comparison for publication. A saved patch can reach the hosted test even when
+the translator declares incomplete deliverables. Incomplete generation still
+keeps the evidence in Actions. No manual candidate repair occurs.
 
 A stable bot-owned branch is used per condition and destination branch. Subsequent
 successful runs update that draft, rather than opening one PR per attempt. Branch
@@ -135,7 +140,7 @@ tolerances live in that separate directory. It calls the repository's native MIA
 on source and target, rather than requiring a newly generated example adapter.
 Passing this validator would support only its limited test scope.
 
-Workflow tooling and optional validators are excluded from frozen source snapshots,
+Workflow tooling, optional validators and prior `translation-experiments/` review files are excluded from frozen source snapshots,
 even when the source revision contains them. Excluded paths are
 `.github/scripts/translation/`, `.github/translation/`, `.github/translation-validators/`,
 `.github/workflows/repository-translation.yml` and `tests/workflows/translation/`.

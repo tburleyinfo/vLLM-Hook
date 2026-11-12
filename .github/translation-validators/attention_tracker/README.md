@@ -1,8 +1,8 @@
 # Optional Attention Tracker validation
 
 This directory is a post-generation test consumer. It is not a translation profile,
-implementation recipe or source of model instructions. The action selects it for post-generation runtime validation by default and
-excludes it from translation source snapshots and supplied graphs.
+implementation recipe or source of model instructions. The action attaches it to
+draft PRs by default and excludes it from translation source snapshots and supplied graphs.
 
 To select it, set the action's `validator_profile` input to:
 
@@ -19,12 +19,13 @@ For local act use the same path in `TRANSLATION_VALIDATOR_PROFILE`.
   native `MiaLLM` API, for the source or translated repository.
 - `validate.py` runs both executions and compares their reported contracts/scores.
 
-On GitHub, `hosted.py` provisions a Linux CPU environment from the source's CPU
+The draft's `validation/README.md` shows how to run the exact saved patch manually
+and compare the two backend reports. With hosted validation enabled, `hosted.py`
+provisions a Linux CPU environment from the source's CPU
 profile and a separate Apple Silicon Metal environment. Both download the exact
 same pinned model before offline fixture execution. `hosted_runtime.py` compares
 the two reports after both jobs finish. Missing environments/devices and failing
-comparisons prevent draft publication. Turn `runtime_validation` off explicitly
-to publish complete deliverables without this check.
+comparisons prevent draft publication only when you opt in to hosted validation.
 
 The default fixture now uses Qwen2.5-0.5B-Instruct at revision
 `7ae557604adf67be50417f59c2c2f167def9a775` to fit a small hosted Mac. The previous

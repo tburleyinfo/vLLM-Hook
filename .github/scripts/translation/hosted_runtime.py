@@ -16,11 +16,11 @@ def write(path, value):
     path.write_text(json.dumps(value, indent=2) + '\n')
 
 
-def selected_profile(profile):
+def selected_profile(profile, *, root=None):
     profile = profile.resolve()
-    root = Path(__file__).resolve().parents[2] / 'translation-validators'
+    root = root.resolve() if root else Path(__file__).resolve().parents[2] / 'translation-validators'
     if not profile.is_relative_to(root) or not profile.is_file():
-        raise ValueError('Hosted profiles must be in .github/translation-validators')
+        raise ValueError(f'Validator profile must be a file under {root}')
     definition = json.loads(profile.read_text())
     paths = {}
     for name in ('script', 'config'):
@@ -32,16 +32,19 @@ def selected_profile(profile):
     for path in sorted(profile.parent.rglob('*')):
         if path.is_symlink():
             raise ValueError('Validator files must not be symlinks')
-        if path.is_file() and '__pycache__' not in path.parts:
+        if path.is_file() and not any(part.startswith('.') or part == '__pycache__'
+                                      for part in path.relative_to(profile.parent).parts):
             evidence[path.relative_to(profile.parent).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
     paths['sha256'] = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
     return paths
 
 
-def execute(bundle, profile, backend, output):
+def execute(bundle, profile, backend, output, *, attached=False):
     started = time.perf_counter()
-    selected = selected_profile(profile)
+    selected = selected_profile(profile, root=bundle / 'profile' if attached else None)
     metadata = json.loads((bundle / 'metadata.json').read_text())
+    if attached and selected['sha256'] != metadata.get('validator_sha256'):
+        raise ValueError('Changed attached validator')
     patch = (bundle / 'candidate.patch').read_bytes()
     if hashlib.sha256(patch).hexdigest() != metadata['patch_sha256']:
         raise ValueError('Changed candidate patch')
@@ -74,9 +77,11 @@ def execute(bundle, profile, backend, output):
     return result
 
 
-def finalize(bundle, profile, cpu, target, output):
-    selected = selected_profile(profile)
+def finalize(bundle, profile, cpu, target, output, *, attached=False):
+    selected = selected_profile(profile, root=bundle / 'profile' if attached else None)
     metadata = json.loads((bundle / 'metadata.json').read_text())
+    if attached and selected['sha256'] != metadata.get('validator_sha256'):
+        raise ValueError('Changed attached validator')
     provenance = {key: metadata.get(key) for key in ('experiment_id', 'use_case', 'condition', 'source_revision', 'patch_sha256')}
     provenance['validator_sha256'] = selected['sha256']
     if not cpu.is_file() or not target.is_file():
@@ -101,7 +106,7 @@ def finalize(bundle, profile, cpu, target, output):
     result = validator.compare(source, translated, settings['tolerance'])
     result.update(provenance, executions={'cpu': source, 'target': translated})
     write(output, result)
-    if result['status'] != 'pass':
+    if attached or result['status'] != 'pass':
         return result
     previous = metadata['validation']
     metadata['validation'] = 'pass'
@@ -128,9 +133,10 @@ if __name__ == '__main__':
     parser.add_argument('--target', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
+    attached = Path(__file__).resolve().parent == args.bundle.resolve()
     try:
-        result = execute(args.bundle, args.profile, args.backend, args.output) if args.backend else finalize(
-            args.bundle, args.profile, args.cpu, args.target, args.output)
+        result = execute(args.bundle, args.profile, args.backend, args.output, attached=attached) if args.backend else finalize(
+            args.bundle, args.profile, args.cpu, args.target, args.output, attached=attached)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
         result = {'status': 'blocked', 'error': str(error)}
         write(args.output / 'result.json' if args.backend else args.output, result)

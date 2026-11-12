@@ -4,15 +4,60 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
+
+import hosted_runtime
 
 
 def command(args, cwd, env=None):
     return subprocess.check_output(args, cwd=cwd, env=env).decode().strip()
 
 
-def prepare(run, condition, validation, output, *, for_runtime=False):
+def attach_validation(review, profile, metadata, patch):
+    selected = hosted_runtime.selected_profile(profile)
+    profile = profile.resolve()
+    kit = review / 'validation'
+    shutil.copytree(profile.parent, kit / 'profile',
+                    ignore=shutil.ignore_patterns('.*', '__pycache__'))
+    attached_profile = kit / 'profile' / profile.name
+    if hosted_runtime.selected_profile(attached_profile, root=kit / 'profile')['sha256'] != selected['sha256']:
+        raise ValueError('Attached validator differs from the selected profile')
+    shutil.copyfile(Path(hosted_runtime.__file__), kit / 'hosted_runtime.py')
+    (kit / 'candidate.patch').write_bytes(patch)
+    (kit / 'metadata.json').write_text(json.dumps({
+        **metadata, 'validator_sha256': selected['sha256']}, indent=2) + '\n')
+    path = f'translation-experiments/{metadata["condition"]}-{metadata["patch_sha256"]}/validation'
+    (kit / 'README.md').write_text(
+        '# Run validation manually\n\n'
+        'Use Python 3.12 and run from the root of a checkout of this PR. The clone must contain '
+        f'the pinned source commit `{metadata["source_revision"]}`. The runner verifies the attached '
+        'patch and profile and reconstructs the candidate from that commit. Use a new output '
+        'directory for each execution.\n\n'
+        '```bash\n'
+        f'KIT="{path}"\n'
+        f'PROFILE="$KIT/profile/{profile.name}"\n'
+        'RESULTS="$(mktemp -d)"\n'
+        '```\n\n'
+        'On Linux, run the CPU reference. On Apple Silicon macOS, run the Metal candidate. '
+        'Set the variables above on each machine.\n\n'
+        '```bash\n'
+        'python3.12 "$KIT/hosted_runtime.py" --bundle "$KIT" --profile "$PROFILE" --backend cpu --output "$RESULTS/cpu"\n'
+        'python3.12 "$KIT/hosted_runtime.py" --bundle "$KIT" --profile "$PROFILE" --backend target --output "$RESULTS/target"\n'
+        '```\n\n'
+        'Copy the CPU and Metal result folders to the same machine and compare them. '
+        'If you already have a CPU report for the exact same patch, source and profile, you can reuse it.\n\n'
+        '```bash\n'
+        'python3.12 "$KIT/hosted_runtime.py" --bundle "$KIT" --profile "$PROFILE" '
+        '--cpu "$RESULTS/cpu/result.json" --target "$RESULTS/target/result.json" '
+        '--output "$RESULTS/comparison.json"\n'
+        '```\n\n'
+        'Keep both backend reports and `comparison.json` with the experiment record.\n')
+    return path
+
+
+def prepare(run, condition, validation, output, *, for_runtime=False, validator_profile=None):
     directory = run / condition
     report = json.loads((directory / 'translation-result.json').read_text())
     patch = (directory / 'translation.patch').read_bytes()
@@ -40,6 +85,7 @@ def prepare(run, condition, validation, output, *, for_runtime=False):
         (output / 'tracking.json').write_bytes(receipt.read_bytes())
     review = output / 'review-files'
     review.mkdir(exist_ok=True)
+    validation_path = attach_validation(review, validator_profile, metadata, patch) if validator_profile else None
     summary = {
         'condition': label, 'source_revision': manifest['source_revision'],
         'experiment_id': metadata['experiment_id'], 'use_case': metadata['use_case'],
@@ -73,7 +119,8 @@ def prepare(run, condition, validation, output, *, for_runtime=False):
                 target.write_bytes(path.read_bytes())
     (output / 'body.md').write_text(
         f'Repository translation using **{label}**. Validation: **{validation}**.\n\n'
-        'Implementation, usage notes and experiment evidence are included in the changed files.\n')
+        'Implementation, usage notes and experiment evidence are included in the changed files.\n'
+        + (f'\nManual CPU/Metal test instructions: `{validation_path}/README.md`.\n' if validation_path else ''))
 
 
 
@@ -104,7 +151,8 @@ def publish(bundle, repo, base, checkout, artifact_url=None):
         command(['git', 'apply', '--cached', '--check', str(patch.resolve())], checkout, env)
         command(['git', 'apply', '--cached', str(patch.resolve())], checkout, env)
         paths = subprocess.check_output(['git', 'diff', '--cached', '--name-only', '-z', parent], cwd=checkout, env=env).decode().split('\0')
-        protected = {'.git', '.github', 'platform_reference', 'target_relationships', 'translation_discovery'}
+        protected = {'.git', '.github', 'platform_reference', 'target_relationships',
+                     'translation_discovery', 'translation-experiments'}
         if not any(paths) or any(Path(path).parts[0] in protected for path in paths if path):
             raise ValueError('Patch changes workflow infrastructure, supplied evidence or internal discovery artifacts')
         deleted = command(['git', 'diff', '--cached', '--no-renames', '--diff-filter=D', '--name-only', parent], checkout, env)
