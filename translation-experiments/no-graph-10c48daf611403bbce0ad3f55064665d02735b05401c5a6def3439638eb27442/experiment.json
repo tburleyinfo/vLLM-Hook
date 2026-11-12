@@ -1,0 +1,45 @@
+{
+  "condition": "no-graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "",
+  "use_case": "Attention Tracker",
+  "patch_sha256": "10c48daf611403bbce0ad3f55064665d02735b05401c5a6def3439638eb27442",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 170.44,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "attention_tracker.md": "2e0dec20f797a022592aa2e77d5f90f10d52b52db713302dfaceafdcba52353a",
+      "completion.json": "bc1336b110f2537a3df4bd1f6fbb07b803471dde559631d314b1fd6ee3cab9e2"
+    },
+    "patch_sha256": "10c48daf611403bbce0ad3f55064665d02735b05401c5a6def3439638eb27442",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Connect Metal Q/K capture to the existing MiaLLM worker-extension and probe-delivery lifecycle.",
+      "Implement and verify per-request association for packed, chunked, cached, batched and cancelled requests.",
+      "Run end-to-end Attention Tracker API and lifecycle checks on Apple Silicon using vLLM-Metal.",
+      "Validate supported model attention variants, dtype conversion, resource behavior and engine teardown."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}

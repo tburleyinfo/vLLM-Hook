@@ -1,0 +1,26 @@
+{
+  "condition": "no-graph",
+  "patch_sha256": "10c48daf611403bbce0ad3f55064665d02735b05401c5a6def3439638eb27442",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "validation": "skipped",
+  "pilot": true,
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Connect Metal Q/K capture to the existing MiaLLM worker-extension and probe-delivery lifecycle.",
+      "Implement and verify per-request association for packed, chunked, cached, batched and cancelled requests.",
+      "Run end-to-end Attention Tracker API and lifecycle checks on Apple Silicon using vLLM-Metal.",
+      "Validate supported model attention variants, dtype conversion, resource behavior and engine teardown."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "experiment_id": "",
+  "use_case": "Attention Tracker",
+  "runtime_validation_required": false,
+  "validator_sha256": "a96dd7b92f17f75f2d491f8d17d5057d68f43e2ece76c3275a12b78efdaf527c"
+}
