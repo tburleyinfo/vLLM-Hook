@@ -304,6 +304,16 @@ def _marshal_perreq_qk(per_layer: dict, conf: dict, hookq_mode: str, shard=None,
 class QKCaptureWorker:
     """Mixin injected into vLLM's GPU Worker via worker_extension_cls."""
 
+    def mia_install_metal_attention_tracker(self):
+        """Install the Attention Tracker observer on a vLLM-Metal model."""
+        model = getattr(self.model_runner, "model", None)
+        if model is None:
+            raise RuntimeError("vLLM-Metal model is not loaded; cannot install Q/K capture")
+        from mia.backends.vllm_metal_attention import install
+
+        self._mia_metal_qk_layer_names = install(model)
+        return self._mia_metal_qk_layer_names
+
     if TYPE_CHECKING:
         model_runner: Any
         rank: int
@@ -1045,4 +1055,3 @@ class QKCaptureWorker:
         # lazy: keep mia.core.delivery out of import mia
         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
-

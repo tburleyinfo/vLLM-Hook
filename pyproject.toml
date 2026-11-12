@@ -33,6 +33,11 @@ cuda = [
     "vllm==0.29.0",
     "zstandard==0.25.0",
 ]
+metal = [
+    "vllm-metal",
+    "mlx",
+    "mlx-lm",
+]
 
 [dependency-groups]
 test = ["pytest"]
@@ -61,6 +66,8 @@ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854
 # These profiles are deliberately separate, even on a CUDA-capable CPU host.
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
+    [{ extra = "metal" }, { extra = "cpu" }],
+    [{ extra = "metal" }, { extra = "cuda" }],
 ]
 
 [tool.uv.sources]

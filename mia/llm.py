@@ -1,5 +1,6 @@
 """MiaLLM: a vllm.LLM wrapper that arms MIA capture or steering and runs analyzers."""
 import copy
+import contextlib
 import os
 import json
 import uuid
@@ -148,6 +149,9 @@ class MiaLLM:
 
         self.tokenizer = self.llm.get_tokenizer()
         self.llm_engine = self.llm.llm_engine
+        self._metal_qk_layer_names = None
+        if self.worker_name == "capture_qk" and self._metal_plugin_enabled():
+            self._metal_qk_layer_names = self._install_metal_qk_capture()
 
         self._model_dims = None
         try:
@@ -167,6 +171,29 @@ class MiaLLM:
             self._analyzer_accepts = getattr(analyzer_cls, "ACCEPTS", "qk")
             self.analyzer = analyzer_cls(self._hook_dir, self.layer_to_heads)
 
+    @staticmethod
+    def _metal_plugin_enabled() -> bool:
+        plugins = {item.strip().lower() for item in os.environ.get("VLLM_PLUGINS", "").split(",")}
+        return "metal" in plugins
+
+    def _install_metal_qk_capture(self):
+        rpc = getattr(self.llm_engine, "collective_rpc", None)
+        if not callable(rpc):
+            core = getattr(self.llm_engine, "engine_core", None)
+            rpc = getattr(core, "collective_rpc", None)
+        if not callable(rpc):
+            raise RuntimeError(
+                "vLLM-Metal Attention Tracker needs the in-process worker RPC interface "
+                "(set VLLM_ENABLE_V1_MULTIPROCESSING=0)."
+            )
+        installed = rpc("mia_install_metal_attention_tracker")
+        if isinstance(installed, dict):
+            return installed
+        if not isinstance(installed, (list, tuple)) or not installed:
+            raise RuntimeError("vLLM-Metal did not return its installed Q/K attention layers")
+        if not isinstance(installed[0], dict):
+            raise RuntimeError("vLLM-Metal returned an invalid installed Q/K layer map")
+        return installed[0]
 
     def load_config(self, config_file: str):
         """Load worker settings (important heads, Q/K mode, steering, HS layers) from JSON."""
@@ -350,11 +377,21 @@ class MiaLLM:
                                     "repetition_penalty")}
         PROF.incr("miallm.generate.calls")
         PROF.gauge("miallm.prompts", len(prompts))
-        with PROF.timed("miallm.generate"):
-            if all(sp is sp_list[0] for sp in sp_list):
-                outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
-            else:
-                outputs = self.llm.generate(prompts, sp_list, **passthrough)
+        metal_capture = (
+            hook and self._metal_qk_layer_names is not None and not save_to_disk
+        )
+        capture_ctx = contextlib.nullcontext(None)
+        if metal_capture:
+            from mia.backends.vllm_metal_attention import capture
+            capture_ctx = capture(len(prompts))
+        with capture_ctx as metal_collector:
+            with PROF.timed("miallm.generate"):
+                if all(sp is sp_list[0] for sp in sp_list):
+                    outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+                else:
+                    outputs = self.llm.generate(prompts, sp_list, **passthrough)
+        if metal_collector is not None:
+            outputs[0].probes = metal_collector.probes(self._metal_qk_layer_names)
 
         if hook and self.worker_name and not save_to_disk:
             # lazy: keep mia.core.delivery out of import mia
@@ -409,4 +446,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-
