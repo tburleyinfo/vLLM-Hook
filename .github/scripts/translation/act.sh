@@ -9,7 +9,10 @@ args=(workflow_dispatch -j experiment -W .github/workflows/repository-translatio
   --input "stage=$stage" --input "run_dir=$run_dir"
   --input "manifest=${TRANSLATION_MANIFEST:-.github/translation/manifest.json}"
   --input "condition=${TRANSLATION_CONDITION:-no-graph}"
+  --input "use_case=${TRANSLATION_USE_CASE:-}"
+  --input "experiment_id=${TRANSLATION_EXPERIMENT_ID:-}"
   --input "validator_profile=${TRANSLATION_VALIDATOR_PROFILE:-}"
+  --input "runtime_validation=${TRANSLATION_RUNTIME_VALIDATION:-false}"
   --input "pilot=${TRANSLATION_PILOT:-true}" --input create_draft_pr=false
   --var "TRANSLATION_LOCAL_REPO=$repo_root")
 for name in TRANSLATION_TARGET_SITE TRANSLATION_COPILOT_BIN TRANSLATION_COPILOT_HOME TRANSLATION_SOURCE_PYTHON TRANSLATION_TARGET_PYTHON TRANSLATION_MODEL_CACHE TRANSLATION_WANDB_ENTITY TRANSLATION_WANDB_PROJECT; do

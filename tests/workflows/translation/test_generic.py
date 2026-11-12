@@ -29,7 +29,8 @@ class GenericWorkflowTests(unittest.TestCase):
         (self.repo / 'application.py').write_text('def start(value):\n    return finish(value)\ndef finish(value):\n    return value\n')
         # Even when committed alongside source, hidden validators and workflow tools must be withheld.
         for name in ('.github/translation-validators/secret/fixture.py', '.github/scripts/translation/internal.py',
-                     '.github/translation/private.json', 'tests/workflows/translation/internal.py'):
+                     '.github/translation/private.json', 'tests/workflows/translation/internal.py',
+                     'translation-experiments/old/validation/profile/fixture.py'):
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('PRIVATE_VALIDATOR_SENTINEL = True\n')
@@ -48,20 +49,28 @@ class GenericWorkflowTests(unittest.TestCase):
         self.repo_patch.start()
         self.addCleanup(self.repo_patch.stop)
 
-    def prepared(self, name='trial'):
+    def prepared(self, name='trial', use_case=''):
         run = self.root / name
-        runner.prepare(run, self.manifest_path)
+        args = ['run.py', '--stage', 'prepare', '--run-dir', str(run),
+                '--manifest', str(self.manifest_path), '--use-case', use_case]
+        with patch('sys.argv', args):
+            runner.main()
         runner.platform_evidence.discover(run, self.site)
         repository_graph.write_retrieval(run)
         runner.platform_evidence.freeze(run)
         return run
 
-    def invoke(self, name, validator=None, expect_failure=False, generator=generate_fixture):
+    def invoke(self, name, validator=None, expect_failure=False, generator=generate_fixture, *, hosted=False, attachment=None):
         run, bundle = self.root / name, self.root / (name + '-bundle')
         args = ['run.py', '--stage', 'run', '--run-dir', str(run), '--manifest', str(self.manifest_path),
-                '--target-site', str(self.site), '--condition', 'graph', '--pilot', '--prepare-pr', str(bundle)]
+                '--target-site', str(self.site), '--condition', 'graph', '--pilot',
+                '--prepare-runtime' if hosted else '--prepare-pr', str(bundle)]
+        if hosted:
+            args += ['--use-case', 'Search Results', '--experiment-id', 'search-pair-1']
         if validator:
             args += ['--validator-profile', str(validator)]
+        if attachment:
+            args += ['--attach-validator', str(attachment)]
         with patch('sys.argv', args), patch.object(runner, 'translate', side_effect=generator):
             if expect_failure:
                 with self.assertRaises(SystemExit) as caught:
@@ -104,6 +113,18 @@ class GenericWorkflowTests(unittest.TestCase):
         self.assertFalse((run / 'source_dag.mmd').exists())
         self.assertFalse((run / 'dependencies.md').exists())
 
+    def test_use_case_is_shared_and_frozen(self):
+        run = self.prepared(use_case='Search Results')
+        ordinary, graph = [(run / condition / 'prompt.md').read_text() for condition in runner.CONDITIONS]
+        self.assertIn('Selected use case: "Search Results".', ordinary)
+        self.assertNotIn('Translate every existing source notebook', ordinary)
+        self.assertEqual(graph, ordinary + '\nSupplied graphs: target_relationships/relationships.md and target_relationships/source/relationships.md.\n')
+        self.assertEqual(json.loads((run / 'protocol.json').read_text())['use_case'], 'Search Results')
+        args = ['run.py', '--stage', 'summary', '--run-dir', str(run), '--use-case', 'Different Case']
+        with patch('sys.argv', args), self.assertRaises(SystemExit) as caught:
+            runner.main()
+        self.assertEqual(caught.exception.code, 2)
+
     def test_example_configuration_is_rejected(self):
         for extra in ('fixture', 'tolerance', 'validation_profile'):
             with self.subTest(extra=extra):
@@ -125,6 +146,28 @@ class GenericWorkflowTests(unittest.TestCase):
         self.assertFalse((delivered / 'translation_discovery').exists())
         self.assertNotIn(b'translation_discovery', (bundle / 'candidate.patch').read_bytes())
 
+    def test_manual_validator_is_attached_after_generation_without_execution(self):
+        profile = runner.PROFILE.parent / 'translation-validators/attention_tracker/profile.json'
+        with patch.object(runner, 'evaluate', side_effect=AssertionError('Validator must not execute')):
+            run, bundle = self.invoke('manual-validator', attachment=profile)
+        kit = bundle / 'review-files/validation'
+        self.assertEqual((kit / 'candidate.patch').read_bytes(), (run / 'graph/translation.patch').read_bytes())
+        self.assertEqual((kit / 'profile/fixture.py').read_bytes(), (profile.parent / 'fixture.py').read_bytes())
+        self.assertIn('validation/README.md', (bundle / 'body.md').read_text())
+        self.assertFalse((run / 'graph/candidate/validation').exists())
+        metadata = json.loads((kit / 'metadata.json').read_text())
+        self.assertEqual(metadata['validation'], 'skipped')
+        report = {'status': 'pass', 'settings': {}, 'scores': [0.5],
+                  **{key: metadata[key] for key in ('source_revision', 'patch_sha256', 'validator_sha256')}}
+        cpu, target, comparison = [self.root / name for name in ('cpu.json', 'target.json', 'comparison.json')]
+        runner.write_json(cpu, {**report, 'backend': 'cpu'})
+        runner.write_json(target, {**report, 'backend': 'target'})
+        subprocess.run([sys.executable, '-B', str(kit / 'hosted_runtime.py'), '--bundle', str(kit),
+                        '--profile', str(kit / 'profile/profile.json'), '--cpu', str(cpu),
+                        '--target', str(target), '--output', str(comparison)], check=True)
+        self.assertEqual(json.loads(comparison.read_text())['status'], 'pass')
+        self.assertEqual(json.loads((kit / 'metadata.json').read_text()), metadata)
+
     def test_incomplete_implementation_keeps_evidence_without_draft(self):
         def incomplete(run, condition, pilot):
             report = generate_fixture(run, condition, pilot)
@@ -135,6 +178,33 @@ class GenericWorkflowTests(unittest.TestCase):
         self.assertFalse(bundle.exists())
         self.assertTrue((run / 'graph/translation.patch').is_file())
         self.assertEqual(json.loads((run / 'graph/completion-result.json').read_text())['status'], 'incomplete')
+
+    def test_hosted_runtime_receives_incomplete_patch_without_enabling_draft(self):
+        def incomplete(run, condition, pilot):
+            report = generate_fixture(run, condition, pilot)
+            (run / condition / 'candidate/translation_discovery/completion.json').unlink()
+            return report
+        run, bundle = self.invoke('hosted-incomplete', generator=incomplete, hosted=True)
+        metadata_path = bundle / 'metadata.json'
+        metadata = json.loads(metadata_path.read_text())
+        self.assertEqual(metadata['experiment_id'], 'search-pair-1')
+        self.assertEqual(metadata['use_case'], 'Search Results')
+        self.assertEqual(metadata['completion']['status'], 'incomplete')
+        self.assertEqual(metadata['validation'], 'pending')
+        self.assertEqual((bundle / 'candidate.patch').read_bytes(), (run / 'graph/translation.patch').read_bytes())
+        metadata['validation'] = 'pass'
+        runner.write_json(metadata_path, metadata)
+        with self.assertRaisesRegex(ValueError, 'completed deliverables'):
+            runner.publish_candidate.publish(bundle, 'example/project', 'main', self.repo)
+
+    def test_failed_generation_leaves_results_without_runtime_bundle(self):
+        def no_patch(run, condition, pilot):
+            return {'status': 'fail', 'error': 'Translator produced no candidate patch'}
+        run, bundle = self.invoke('hosted-no-patch', expect_failure=True, generator=no_patch, hosted=True)
+        self.assertFalse(bundle.exists())
+        result = json.loads((run / 'results.json').read_text())['conditions']['graph']
+        self.assertEqual(result['translation']['status'], 'fail')
+        self.assertEqual(result['validation']['status'], 'not_run')
 
     def test_failed_optional_validator_preserves_inputs_but_prevents_draft(self):
         without, _ = self.invoke('without')
@@ -202,6 +272,15 @@ class GenericWorkflowTests(unittest.TestCase):
         self.assertEqual(report['status'], 'pass')
         self.assertEqual(report['resolved_models'], ['fixture-model'])
         self.assertIn(b'generated.py', (run / 'no_graph/translation.patch').read_bytes())
+
+    def test_controlled_generation_requires_explicit_fixed_model(self):
+        self.manifest['translator']['model'] = 'named-model'
+        runner.write_json(self.manifest_path, self.manifest)
+        run = self.prepared()
+        with patch.object(runner, 'command', side_effect=AssertionError('Model must not run')):
+            report = runner.generate_translation(run, 'no_graph')
+        self.assertEqual(report['status'], 'blocked')
+        self.assertIn('fixed model', report['error'])
 
     def test_custom_validator_cannot_leak_through_source_location(self):
         profile = self.repo / "tests/example_validator/profile.json"

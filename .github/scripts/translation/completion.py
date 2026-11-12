@@ -8,7 +8,7 @@ def notebook_outputs(source):
             for p in sorted(source.rglob('*.ipynb')) if '.git' not in p.relative_to(source).parts}
 
 
-def check(source, candidate):
+def check(source, candidate, *, use_case=''):
     errors = []
     declaration = candidate / 'translation_discovery/completion.json'
     try:
@@ -19,7 +19,7 @@ def check(source, candidate):
         errors.append('Missing or invalid translation_discovery/completion.json')
     if not (candidate / 'TRANSLATION.md').is_file():
         errors.append('Missing TRANSLATION.md')
-    notebooks = notebook_outputs(source)
+    notebooks = {} if use_case else notebook_outputs(source)
     for original, output in notebooks.items():
         path = candidate / output
         try:
@@ -37,4 +37,5 @@ def check(source, candidate):
         except (OSError, ValueError, AttributeError, TypeError) as error:
             errors.append(f'{output}: {error}')
     return {'status': 'pass' if not errors else 'incomplete', 'errors': errors,
-            'notebooks': notebooks, 'scope': 'Translator completion declaration and notebook structure; runtime validation is separate'}
+            'notebooks': notebooks, 'use_case': use_case,
+            'scope': 'Translator completion declaration and required deliverables; runtime validation is separate'}

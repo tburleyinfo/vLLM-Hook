@@ -24,6 +24,7 @@ class CompletionTests(unittest.TestCase):
             (candidate / 'translation_discovery/completion.json').write_text(json.dumps({'status': 'complete', 'remaining_work': []}))
             (candidate / 'TRANSLATION.md').write_text('Usage and implemented behavior')
             self.assertEqual(completion.check(source, candidate)['status'], 'incomplete')
+            self.assertEqual(completion.check(source, candidate, use_case='Search Results')['status'], 'pass')
             translated = candidate / 'translated_notebooks/notebooks/demo.ipynb'
             translated.parent.mkdir(parents=True)
             translated.write_text(json.dumps(notebook('original()')))

@@ -6,8 +6,10 @@ pull request. It contains no required example adapter, model, input prompts,
 scoring rule, hand-drawn example graph or example-specific dependency map.
 
 Ordinary examples already in the source repository remain available for code
-inspection. The action does not select an example or tell the translator to build
-an example-specific interface. Translation should preserve the repository's own APIs.
+inspection. A run may name a use case as an argument to the shared workflow.
+The translator discovers the relevant behavior and dependencies from the source
+and preserves the repository's own APIs. The use-case name is shared by both
+conditions and recorded in the frozen protocol.
 
 ## Inputs and output
 
@@ -21,9 +23,11 @@ Translation → Run workflow**:
 | --- | --- | --- |
 | `stage` | `run` | Prepare, discover, freeze, generate and package in one job |
 | `condition` | `no-graph` | `graph` adds extracted source/target graphs; `both` runs a pair |
+| `use_case` | Empty | Use case to migrate, such as `Attention Tracker`; empty keeps repository-wide scope |
+| `experiment_id` | Empty | Shared label for the two runs in a research pair |
 | `manifest` | `.github/translation/manifest.json` | Repository revision, platforms, behavior requirements, target packages and translator settings |
-| `runtime_validation` | Checked | Require independent CPU/Mac-Metal comparison before publication |
-| `validator_profile` | Attention Tracker profile | Post-generation comparison settings; never a translation input |
+| `runtime_validation` | Unchecked | Opt in to running CPU/Metal tests on GitHub before publication |
+| `validator_profile` | Attention Tracker profile | Independent tests attached to the draft for manual execution |
 | `create_draft_pr` | Checked | Publish only complete deliverables; update the existing draft for this condition and base |
 | `pr_base` | `main` | Draft destination |
 | `run_dir` | Empty | Unique directory for hosted `run`; persistent directories are for local stages |
@@ -31,25 +35,40 @@ Translation → Run workflow**:
 
 Use one condition per runtime comparison. For generation-only paired research, use
 `condition: both` with `create_draft_pr` and `runtime_validation` unchecked.
-The default manifest describes vLLM CPU/CUDA → vLLM-Metal on Apple Silicon, but
-contains no Attention Tracker contract or inference settings. Change platform
+For the first Attention Tracker pair, dispatch once with `condition: no-graph`
+and once with `condition: graph`. Use the same unique `experiment_id`, workflow
+revision, manifest, `use_case: Attention Tracker` and validator profile. Keep
+`runtime_validation` off and `create_draft_pr` on. Run the attached validator
+for each draft when an Apple Silicon Mac is available. Record the run order and
+keep both outcomes, including attempts that do not produce a draft. For a
+controlled pair, select a manifest with an explicit
+model, `fixed_model: true`, and matching settings for both runs, then turn
+`pilot` off. The default Auto manifest is suitable for a pilot.
+The default manifest describes vLLM CPU/CUDA → vLLM-Metal on Apple Silicon,
+with no case-specific implementation instructions or inference settings. Change platform
 names, repository requirements and target packages to use another Python backend.
 The translating model reads source files; it does not execute the target backend.
 The target platform therefore does not determine the hosted generation machine.
 
-Publication waits for completed implementation and notebook deliverables. The model
+Publication waits for completed deliverables for the selected scope. The model
 must write `translation_discovery/completion.json` declaring `status: complete` and
-an empty `remaining_work` list, plus `TRANSLATION.md`. Every original notebook needs
+an empty `remaining_work` list, plus runnable usage notes in `TRANSLATION.md`.
+For repository-wide runs, every original notebook also needs
 a new translated counterpart under `translated_notebooks/<original path>`, with
 nonempty changed code cells and cleared outputs. These checks establish deliverable
 presence, not behavioral correctness or execution of every notebook.
 
-CPU-to-Metal runtime validation is **on by default**. After generation, separate
-read-only jobs provision the source CPU baseline on Ubuntu and the candidate on
-Apple Silicon macOS. The comparison must pass before a PR is opened or updated.
-Turning `runtime_validation` off permits a complete but explicitly unvalidated draft.
-Incomplete generation, failed/blocked validation, and missing runtime hardware
-keep the evidence in Actions and do not open a PR. No manual candidate repair occurs.
+CPU-to-Metal runtime validation is **off by default**. Complete drafts open with
+validation marked skipped and include the selected profile, exact patch and
+manual instructions under `translation-experiments/<condition>-<patch-sha256>/validation/`.
+The instructions show how to run the CPU reference on Linux and the candidate
+on Apple Silicon, then compare the saved reports. Draft creation can proceed
+while a Mac is unavailable.
+
+Checking `runtime_validation` opts in to hosted tests and requires a passing
+comparison for publication. A saved patch can reach the hosted test even when
+the translator declares incomplete deliverables. Incomplete generation still
+keeps the evidence in Actions. No manual candidate repair occurs.
 
 A stable bot-owned branch is used per condition and destination branch. Subsequent
 successful runs update that draft, rather than opening one PR per attempt. Branch
@@ -57,8 +76,13 @@ updates use a lease and refuse branches changed by other authors or PRs already
 marked ready for review. Old experimental PRs are not automatically closed.
 
 The draft contains the selected implementation, usage files, experiment results,
-frozen manifest, protocol, prompt and generated discovery documents. Raw execution
-logs and the original patch remain downloadable for 14 days. Supplied reference
+frozen manifest, protocol, prompt and generated discovery documents. The Actions
+evidence also preserves the frozen inputs, usage report when available, original
+patch, logs and results for runs without a draft. Download both runs' evidence and
+runtime comparisons before the repository's artifact retention period expires.
+The protocol records graph preparation time and available input sizes in bytes.
+Those sizes describe files the translator could inspect. The usage report records
+what the model service reports consuming. Supplied reference
 libraries and graph scaffolding stay outside the candidate PR; their frozen inputs
 are recorded in the protocol. Publication uses a separate Git index, checks patch
 applicability against the selected base and reuses matching drafts.
@@ -116,7 +140,7 @@ tolerances live in that separate directory. It calls the repository's native MIA
 on source and target, rather than requiring a newly generated example adapter.
 Passing this validator would support only its limited test scope.
 
-Workflow tooling and optional validators are excluded from frozen source snapshots,
+Workflow tooling, optional validators and prior `translation-experiments/` review files are excluded from frozen source snapshots,
 even when the source revision contains them. Excluded paths are
 `.github/scripts/translation/`, `.github/translation/`, `.github/translation-validators/`,
 `.github/workflows/repository-translation.yml` and `tests/workflows/translation/`.
@@ -149,9 +173,11 @@ Configure these Actions repository settings:
 
 The workflow checks these settings before model usage. The existing project is
 `tm8ctgzqj8-georgia-institute-of-technology/vllm-hook-translation-trials`.
-Each real translating condition gets a dedicated W&B record before execution; a
-pair shares a group. Records contain hashes, platform requirements, model, timings
-and outcomes. Full code, prompts, raw logs and machine metadata are not uploaded
+Each real translating condition gets a dedicated W&B record before execution.
+Separate dispatches with the same `experiment_id` share a W&B group. The hosted
+comparison updates the same record after CPU and Metal validation. Records contain
+hashes, platform requirements, model, timings and outcomes. Full code, prompts,
+raw logs and machine metadata are not uploaded
 to W&B; review evidence is committed in the draft and raw execution logs stay in Actions artifacts.
 
 Enable **Settings → Actions → General → Allow GitHub Actions to create and approve
@@ -196,6 +222,9 @@ TRANSLATION_CONDITION=graph .github/scripts/translation/act.sh run
 `TRANSLATION_MANIFEST` selects another generic manifest. `TRANSLATION_VALIDATOR_PROFILE`
 selects an optional post-generation profile. No Attention Tracker script is selected
 by the launcher. `act` itself is a local prerequisite; GitHub runners do not need it.
+Set `TRANSLATION_USE_CASE` and `TRANSLATION_EXPERIMENT_ID` for local `act`, or
+pass `--use-case` and `--experiment-id` to `run.py` when preparing a run. Use a
+new run to change either frozen value.
 
 For separate stages use the same explicit persistent run directory and runner host:
 
@@ -231,8 +260,8 @@ to exist on the default branch: [GitHub documentation](https://docs.github.com/e
 The task is to implement the target backend through the existing public API. Prefer
 new backend modules, tests and usage files, with small integration edits. Preserve
 existing features, files, dependency profiles and installation paths. For the
-default manifest this includes capture, steering and analysis on Metal alongside
-CPU/CUDA support. Record implemented behavior, usage, checks actually performed
+default manifest this includes the required capture, steering and analysis on Metal
+for the selected scope alongside CPU/CUDA support. Record implemented behavior, usage, checks actually performed
 and remaining work in a new `TRANSLATION.md`; disabling a feature is not implementation.
 
 The publisher rejects deletion or renaming of existing files. This file-preservation
