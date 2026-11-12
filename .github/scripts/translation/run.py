@@ -474,7 +474,7 @@ def main():
                 elif output.exists():
                     report = json.loads(output.read_text())
                 else:
-                    reason = "Validator attached for manual execution" if args.attach_validator else "No validator selected"
+                    reason = "Manual runtime validation selected" if args.attach_validator else "No validator selected"
                     report = {"status": "skipped", "reason": reason}
                     write_json(output, report)
                 platform_evidence.verify_context(run, condition)
@@ -487,15 +487,12 @@ def main():
                 protocol = json.loads((run / "protocol.json").read_text())
                 completed = completion.check(run / 'source', directory / 'candidate', use_case=protocol.get("use_case", ""))
                 write_json(directory / 'completion-result.json', completed)
-                eligible = completed['status'] == 'pass' and validation in ('pass', 'skipped')
                 if args.prepare_runtime and validation in ("pending", "pass", "skipped"):
                     publish_candidate.prepare(run, condition, validation, args.prepare_runtime.resolve(),
                                               for_runtime=True, validator_profile=args.attach_validator)
-                elif args.prepare_pr and eligible:
+                elif args.prepare_pr and validation in ('pass', 'skipped'):
                     publish_candidate.prepare(run, condition, validation, args.prepare_pr.resolve(),
                                               validator_profile=args.attach_validator)
-                elif not eligible:
-                    failed = True
     if args.stage == "evaluate":
         for condition in conditions:
             report = evaluate(run, condition, args.validator_profile, args.validation_python, args.timeout)

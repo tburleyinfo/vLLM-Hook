@@ -65,8 +65,8 @@ def prepare(run, condition, validation, output, *, for_runtime=False, validator_
     if validation not in ('pass', 'skipped') and not (for_runtime and validation == 'pending'):
         raise ValueError('Failed or blocked validation cannot be published')
     completion = json.loads((directory / 'completion-result.json').read_text())
-    if completion.get('status') != 'pass' and not for_runtime:
-        raise ValueError('Completed implementation and required deliverables are required')
+    if completion.get('status') not in ('pass', 'incomplete'):
+        raise ValueError('A deliverable status is required')
     if report.get('status') != 'pass' or not patch or sha != report.get('patch_sha256'):
         raise ValueError('Successful translation and unchanged saved patch required')
     protocol = json.loads((run / 'protocol.json').read_text())
@@ -86,6 +86,9 @@ def prepare(run, condition, validation, output, *, for_runtime=False, validator_
     review = output / 'review-files'
     review.mkdir(exist_ok=True)
     validation_path = attach_validation(review, validator_profile, metadata, patch) if validator_profile else None
+    status = f'Deliverables: **{completion["status"]}**. Validation: **{validation}**.'
+    remaining = completion.get('remaining_work') or completion.get('errors', [])
+    handoff = ('\n\nRemaining work:\n' + '\n'.join(f'- {item}' for item in remaining)) if remaining else ''
     summary = {
         'condition': label, 'source_revision': manifest['source_revision'],
         'experiment_id': metadata['experiment_id'], 'use_case': metadata['use_case'],
@@ -98,7 +101,7 @@ def prepare(run, condition, validation, output, *, for_runtime=False, validator_
     (review / 'experiment.json').write_text(json.dumps(summary, indent=2) + '\n')
     (review / 'README.md').write_text(
         f'# Translation experiment ({label})\n\n'
-        f'Generation: **{report["status"]}**. Validation: **{validation}**.\n\n'
+        f'Generation: **{report["status"]}**. {status}{handoff}\n\n'
         'Generation success does not establish runtime correctness. '
         'Skipped validation is not a passing functional test.\n\n'
         'Implementation and usage notes are in the PR files. '
@@ -118,7 +121,7 @@ def prepare(run, condition, validation, output, *, for_runtime=False, validator_
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(path.read_bytes())
     (output / 'body.md').write_text(
-        f'Repository translation using **{label}**. Validation: **{validation}**.\n\n'
+        f'Repository translation using **{label}**. {status}{handoff}\n\n'
         'Implementation, usage notes and experiment evidence are included in the changed files.\n'
         + (f'\nManual CPU/Metal test instructions: `{validation_path}/README.md`.\n' if validation_path else ''))
 
@@ -130,9 +133,9 @@ def publish(bundle, repo, base, checkout, artifact_url=None):
     sha = hashlib.sha256(patch.read_bytes()).hexdigest()
     if metadata.get('runtime_validation_required') and metadata.get('validation') != 'pass':
         raise ValueError('CPU/Metal runtime validation must pass before publication')
-    if metadata.get('completion', {}).get('status') != 'pass' or metadata.get('validation') not in ('pass', 'skipped'):
-        raise ValueError('Publication requires completed deliverables and no failed validation')
-    if sha != metadata['patch_sha256'] or metadata['condition'] not in ('graph', 'no-graph'):
+    if metadata.get('completion', {}).get('status') not in ('pass', 'incomplete') or metadata.get('validation') not in ('pass', 'skipped'):
+        raise ValueError('Draft publication requires a deliverable status and no failed validation')
+    if not patch or sha != metadata['patch_sha256'] or metadata['condition'] not in ('graph', 'no-graph'):
         raise ValueError('Invalid publication bundle')
     body = (bundle / 'body.md').read_text()
     if artifact_url:

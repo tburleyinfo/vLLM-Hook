@@ -168,18 +168,22 @@ class GenericWorkflowTests(unittest.TestCase):
         self.assertEqual(json.loads(comparison.read_text())['status'], 'pass')
         self.assertEqual(json.loads((kit / 'metadata.json').read_text()), metadata)
 
-    def test_incomplete_implementation_keeps_evidence_without_draft(self):
+    def test_incomplete_implementation_packages_manual_review_draft(self):
         def incomplete(run, condition, pilot):
             report = generate_fixture(run, condition, pilot)
             runner.write_json(run / condition / 'candidate/translation_discovery/completion.json',
                               {'status': 'incomplete', 'remaining_work': ['Wire backend into public API']})
             return report
-        run, bundle = self.invoke('incomplete', expect_failure=True, generator=incomplete)
-        self.assertFalse(bundle.exists())
+        profile = runner.PROFILE.parent / 'translation-validators/attention_tracker/profile.json'
+        run, bundle = self.invoke('incomplete', generator=incomplete, attachment=profile)
+        self.assertTrue((bundle / 'review-files/validation/profile/fixture.py').is_file())
+        body = (bundle / 'body.md').read_text()
+        self.assertIn('Deliverables: **incomplete**. Validation: **skipped**.', body)
+        self.assertIn('- Wire backend into public API', body)
         self.assertTrue((run / 'graph/translation.patch').is_file())
         self.assertEqual(json.loads((run / 'graph/completion-result.json').read_text())['status'], 'incomplete')
 
-    def test_hosted_runtime_receives_incomplete_patch_without_enabling_draft(self):
+    def test_hosted_runtime_receives_incomplete_patch_but_requires_validation(self):
         def incomplete(run, condition, pilot):
             report = generate_fixture(run, condition, pilot)
             (run / condition / 'candidate/translation_discovery/completion.json').unlink()
@@ -192,9 +196,7 @@ class GenericWorkflowTests(unittest.TestCase):
         self.assertEqual(metadata['completion']['status'], 'incomplete')
         self.assertEqual(metadata['validation'], 'pending')
         self.assertEqual((bundle / 'candidate.patch').read_bytes(), (run / 'graph/translation.patch').read_bytes())
-        metadata['validation'] = 'pass'
-        runner.write_json(metadata_path, metadata)
-        with self.assertRaisesRegex(ValueError, 'completed deliverables'):
+        with self.assertRaisesRegex(ValueError, 'validation must pass'):
             runner.publish_candidate.publish(bundle, 'example/project', 'main', self.repo)
 
     def test_failed_generation_leaves_results_without_runtime_bundle(self):
