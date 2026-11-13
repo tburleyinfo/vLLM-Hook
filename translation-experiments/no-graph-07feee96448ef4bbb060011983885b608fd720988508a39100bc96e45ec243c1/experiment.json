@@ -1,0 +1,42 @@
+{
+  "condition": "no-graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "full-fresh-20261113-06",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json)",
+  "patch_sha256": "07feee96448ef4bbb060011983885b608fd720988508a39100bc96e45ec243c1",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 598.5,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "completion.json": "e967ebf2a14dddd1f90185daa37444aa441fb3bf1be0c6c890a650f6f588220f",
+      "research.md": "776bec61baa7c9378d282b38bea4ae0294f6707f65b2437435ee19d9d0fe6d2a"
+    },
+    "patch_sha256": "07feee96448ef4bbb060011983885b608fd720988508a39100bc96e45ec243c1",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Run the focused tests and end-to-end Attention Tracker generation, capture, in-memory and disk analysis, request cleanup, and engine lifecycle checks on Apple Silicon with vLLM-Metal."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}

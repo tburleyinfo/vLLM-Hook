@@ -164,6 +164,14 @@ def _kind_from_extension(worker_ext):
 _DEFAULT_HOOK_DIR = "/dev/shm/mia"
 
 
+def _metal_plugin_requested() -> bool:
+    return "metal" in {
+        plugin.strip()
+        for plugin in os.environ.get("VLLM_PLUGINS", "").split(",")
+        if plugin.strip()
+    }
+
+
 def _graph_mode() -> bool:
     # lazy: graph install code (reads env at import) stays out of import mia.core._plugin
     from mia.core.hooks.install import graph_mode_enabled
@@ -1202,6 +1210,13 @@ def _capture_mode_line(mode: CaptureMode, engine_args, cg_explicit: bool = False
 
 
 def _patched_create_engine_config(self, *args, **kwargs):
+    if _metal_plugin_requested() and _kind_from_extension(
+        getattr(self, "worker_extension_cls", None)
+    ) == "qk":
+        assert _original_create_engine_config is not None
+        self.worker_extension_cls = None
+        return _original_create_engine_config(self, *args, **kwargs)
+
     if not self.worker_extension_cls:
         worker_type = parse_mia_worker_env(os.environ.get("MIA_WORKER")) or DEFAULT_MIA_WORKER
         self.worker_extension_cls = _WORKER_EXT_BY_KIND[worker_type]
@@ -2475,6 +2490,51 @@ def _patched_llm_generate(self, prompts: Any, sampling_params: Any = None, **kwa
         or bool((sp.extra_args or {}).get("steer"))
         for sp in params_list
     )
+    metal_qk = (
+        _metal_plugin_requested()
+        and needs_hooks
+        and bool(params_list)
+        and all(
+            (sp.extra_args or {}).get("output_qk") is not None
+            and (sp.extra_args or {}).get("output_hidden_states") is None
+            and not (sp.extra_args or {}).get("steer")
+            for sp in params_list
+        )
+    )
+    if metal_qk:
+        assert _original_llm_generate is not None
+        from mia.backends.metal.attention_tracker import take_runner_capture
+
+        with _engine_request_ids(self) as engine_ids:
+            try:
+                outputs = _original_llm_generate(
+                    self, prompts, sampling_params, **kwargs
+                )
+                for output in outputs:
+                    request_id = str(output.request_id)
+                    probes = take_runner_capture(request_id)
+                    if probes is None:
+                        internal_ids = [
+                            internal
+                            for external, (internal, _params) in engine_ids.items()
+                            if external == request_id or internal == request_id
+                        ]
+                        for internal_id in internal_ids:
+                            probes = take_runner_capture(internal_id)
+                            if probes is not None:
+                                break
+                    if probes is None:
+                        raise MiaDeliveryError(
+                            "vLLM-Metal completed generation without an Attention Tracker "
+                            f"capture for request {request_id!r}. Check that the engine "
+                            "uses the inspected Llama model runner and that output_qk is enabled."
+                        )
+                    output.probes = probes
+                return outputs
+            finally:
+                for internal_id, _params in engine_ids.values():
+                    take_runner_capture(internal_id)
+
     _steer_new: list = []
     for _sp in params_list:
         _refuse_unsupported_tp_request(self, _sp.extra_args or {})
@@ -2669,6 +2729,15 @@ def register() -> None:
     _original_create_engine_config = EngineArgs.create_engine_config
     EngineArgs.create_engine_config = _patched_create_engine_config
 
+    if _metal_plugin_requested():
+        from vllm_metal.v1.model_runner import MetalModelRunner
+
+        from mia.backends.metal.attention_tracker import (
+            install_vllm_metal_runner_capture,
+        )
+
+        install_vllm_metal_runner_capture(MetalModelRunner)
+
     try:
         from mia.core.hooks.install import patch_worker_load_model
         patch_worker_load_model()
@@ -2725,4 +2794,3 @@ def register() -> None:
             break
         except Exception:
             pass
-

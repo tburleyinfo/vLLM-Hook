@@ -9,6 +9,7 @@ import time
 from vllm import SamplingParams
 
 from mia import MiaLLM
+from mia.backends.metal.prompt_ranges import chat_template_token_range
 from _paths import config_path
 
 MODEL = os.environ.get("MIA_DEMO_MODEL", "ibm-granite/granite-3.1-8b-instruct")
@@ -44,6 +45,12 @@ def messages_and_range(tokenizer, model_name: str, instruction: str, data: str):
         data_range = ((3, 3 + instruction_len), (-1 - data_len, -1))
     elif "Qwen2-1.5B" in model_name:
         data_range = ((3, 3 + instruction_len), (-5 - data_len, -5))
+    elif "Meta-Llama-3-8B-Instruct" in model_name:
+        instruction_span = chat_template_token_range(
+            tokenizer, messages, instruction
+        )
+        data_span = chat_template_token_range(tokenizer, messages, "Data: " + data)
+        data_range = (instruction_span, data_span)
     else:
         raise NotImplementedError(
             f"no token-range recipe for {model_name!r}; add one here as Attention-Tracker "
