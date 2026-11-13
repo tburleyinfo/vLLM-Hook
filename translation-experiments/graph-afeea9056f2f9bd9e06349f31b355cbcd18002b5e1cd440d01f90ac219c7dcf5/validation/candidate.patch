@@ -1,0 +1,323 @@
+diff --git a/TRANSLATION.md b/TRANSLATION.md
+new file mode 100644
+index 0000000..01e2d92
+--- /dev/null
++++ b/TRANSLATION.md
+@@ -0,0 +1,52 @@
++# vLLM-Metal translation
++
++## Scope and implementation status
++
++This draft targets the Attention Tracker use case and its
++`Qwen2-1.5B-Instruct.json` model configuration. The existing public analyzer
++contract accepts `probes={"qk_cache": ..., "config": ...}` and returns one
++`score` for each supplied input range. A new MLX Q/K conversion module is
++implemented in `mia.backends.metal_qk`: it accepts post-RoPE Q/K arrays,
++converts MLX bfloat16-compatible arrays to float32 before NumPy conversion,
++and produces the existing probe structure using CPU torch tensors.
++
++**Migration status: incomplete.** The Q/K primitive is not yet installed in
++vLLM-Metal's model runner, and `MiaLLM.generate()` does not yet route
++`capture_qk` requests to it. Do not treat capture generation or a completed
++vLLM-Metal model process as evidence that Attention Tracker works. The current
++CUDA worker, steering, hidden-state, graph capture, and delivery paths have
++not been migrated to Metal. No existing CPU/CUDA implementation or dependency
++profile was removed.
++
++## Intended run
++
++The intended environment and example command are documented in
++[`docs/use_cases/attntracker_metal.md`](docs/use_cases/attntracker_metal.md).
++The command is not runnable for MIA capture until the target-runner integration
++listed below is complete. `MiaLLM`, `SamplingParams`, the configured model and
++the analyzer remain the intended public entry points.
++
++## Checks performed
++
++- Inspected the repository's QK capture worker, graph custom-op registration,
++  analyzer, `MiaLLM` generation/probe lifecycle and the selected model config.
++- Inspected the supplied vLLM-Metal worker, model runner, model lifecycle,
++  adapter, Qwen2 MLX attention implementation and attention patching code.
++- Added focused unit tests for the new Q/K conversion and probe format. They
++  have **not** been executed in this environment.
++- No Apple Silicon runtime, model generation, end-to-end capture, analyzer
++  score, behavioral parity, or lifecycle checks were performed.
++
++## Remaining implementation work
++
++1. Add a Metal-native worker/model-runner integration that observes Qwen2's
++   post-RoPE query and full-prefix key arrays during actual vLLM-Metal
++   `LLM.generate()` calls, while preserving request association, prompt
++   boundaries, cleanup and concurrent-request behavior.
++2. Wire the Metal capture to `MiaLLM` and attach probes using the existing
++   output contract; validate both in-memory analysis and save-to-disk behavior.
++3. Run the new unit tests and Apple-Silicon end-to-end tests, including
++   lifecycle and output parity checks.
++4. Implement and validate any other backend capabilities required by the
++   existing public APIs (including steering) before claiming repository-wide
++   Metal parity.
+diff --git a/docs/use_cases/attntracker_metal.md b/docs/use_cases/attntracker_metal.md
+new file mode 100644
+index 0000000..274cde1
+--- /dev/null
++++ b/docs/use_cases/attntracker_metal.md
+@@ -0,0 +1,29 @@
++# Attention Tracker on vLLM-Metal
++
++The existing notebook's `MiaLLM` calls and analyzer can be retained. The model
++configuration is
++`model_configs/attention_tracker/Qwen2-1.5B-Instruct.json`; the example
++arguments remain `worker_name="capture_qk"`, `analyzer_name="attn_tracker"`,
++`config_file=<that JSON>`, and `max_model_len=2048`.
++
++On Apple Silicon, provision the repository's `metal` optional dependency
++profile, then set the target runtime configuration before Python imports vLLM:
++
++```sh
++MIA_DEMO_MODEL=Qwen/Qwen2-1.5B-Instruct \
++MIA_CONFIG_FILE=model_configs/attention_tracker/Qwen2-1.5B-Instruct.json \
++VLLM_ENABLE_V1_MULTIPROCESSING=0 \
++VLLM_METAL_USE_PAGED_ATTENTION=0 \
++VLLM_METAL_MEMORY_FRACTION=auto \
++VLLM_PLUGINS=metal \
++python examples/demo_attntracker.py
++```
++
++**Important:** this command documents the intended invocation, not a working
++end-to-end path yet. The repository's current `capture_qk` worker requires a
++PyTorch V2 model runner and CUDA attention-module hooks. The target Qwen2 model
++uses MLX arrays and the inspected vLLM-Metal runner does not expose that worker
++extension surface. `mia.backends.metal_qk` implements conversion of post-RoPE
++Q/K arrays to the existing analyzer probe contract, but installing that adapter
++in the Metal runner and associating its captures with request outputs remains
++unfinished. The command must not be interpreted as runtime validation.
+diff --git a/mia/backends/__init__.py b/mia/backends/__init__.py
+new file mode 100644
+index 0000000..4056e6d
+--- /dev/null
++++ b/mia/backends/__init__.py
+@@ -0,0 +1 @@
++"""Backend-specific implementations that preserve MIA's public API."""
+diff --git a/mia/backends/metal_qk.py b/mia/backends/metal_qk.py
+new file mode 100644
+index 0000000..492aaa6
+--- /dev/null
++++ b/mia/backends/metal_qk.py
+@@ -0,0 +1,122 @@
++"""MLX Q/K capture primitives for the vLLM-Metal Qwen2 attention path.
++
++The target's Qwen2 implementation calls scaled_dot_product_attention with
++post-RoPE queries and keys. A Metal integration can pass those arrays here
++without changing the model computation.
++"""
++from __future__ import annotations
++
++from contextlib import contextmanager
++from contextvars import ContextVar, Token
++from dataclasses import dataclass, field
++from typing import Iterator
++
++import numpy as np
++import torch
++
++
++_ACTIVE_CAPTURE: ContextVar["MetalQKCapture | None"] = ContextVar(
++    "mia_metal_qk_capture", default=None
++)
++
++
++def _mlx_array_to_numpy(value) -> np.ndarray:
++    """Materialize an MLX array as float32 before crossing into NumPy."""
++    try:
++        import mlx.core as mx
++    except ImportError:
++        return np.asarray(value, dtype=np.float32)
++    return np.asarray(value.astype(mx.float32))
++
++
++@dataclass
++class MetalQKCapture:
++    """Collect single-request Q/K probes in the existing analyzer contract.
++
++    ``record`` expects post-RoPE arrays shaped ``[batch, heads, tokens, dim]``.
++    For the Attention Tracker notebook, the last query row and the complete
++    key prefix are retained once per layer, matching ``hookq_mode=last_token``.
++    """
++
++    num_attention_heads: int
++    num_key_value_heads: int
++    head_dim: int
++    attention_multiplier: float
++    _layers: dict[str, dict] = field(default_factory=dict)
++
++    def record(self, layer_num: int, queries, keys) -> None:
++        """Record one layer's post-RoPE queries and full key prefix."""
++        layer_num = int(layer_num)
++        layer_name = f"model.layers.{layer_num}.self_attn.attn"
++        if layer_name in self._layers:
++            return
++
++        q = _mlx_array_to_numpy(queries)
++        k = _mlx_array_to_numpy(keys)
++        expected_heads = (self.num_attention_heads, self.num_key_value_heads)
++        if q.ndim != 4 or k.ndim != 4:
++            raise ValueError(
++                f"Metal Q/K capture expects rank-4 [batch, heads, tokens, dim] "
++                f"arrays; got q={q.shape}, k={k.shape}"
++            )
++        if q.shape[0] != 1 or k.shape[0] != 1:
++            raise ValueError(
++                "Metal Q/K capture currently requires a single active request; "
++                f"got batch sizes q={q.shape[0]}, k={k.shape[0]}"
++            )
++        if q.shape[1] != expected_heads[0] or k.shape[1] != expected_heads[1]:
++            raise ValueError(
++                f"Metal Q/K head counts do not match model configuration "
++                f"{expected_heads}: q={q.shape}, k={k.shape}"
++            )
++        if q.shape[-1] != self.head_dim or k.shape[-1] != self.head_dim:
++            raise ValueError(
++                f"Metal Q/K head dimension must be {self.head_dim}; "
++                f"got q={q.shape[-1]}, k={k.shape[-1]}"
++            )
++        if q.shape[2] == 0 or k.shape[2] == 0:
++            raise ValueError("Metal Q/K capture cannot record empty token dimensions")
++
++        q_rows = q[0].transpose(1, 0, 2).reshape(
++            q.shape[2], self.num_attention_heads * self.head_dim
++        )
++        k_rows = k[0].transpose(1, 0, 2).reshape(
++            k.shape[2], self.num_key_value_heads * self.head_dim
++        )
++        self._layers[layer_name] = {
++            "q": [torch.from_numpy(np.ascontiguousarray(q_rows[-1])).clone()],
++            "k_all": [torch.from_numpy(np.ascontiguousarray(k_rows)).clone()],
++            "layer_num": layer_num,
++            "hookq_mode": "last_token",
++        }
++
++    def to_probes(self) -> dict:
++        """Return ``probes`` in the shape consumed by MiaLLM and AttntrackerAnalyzer."""
++        return {
++            "qk_cache": dict(self._layers),
++            "config": {
++                "num_attention_heads": int(self.num_attention_heads),
++                "num_key_value_heads": int(self.num_key_value_heads),
++                "head_dim": int(self.head_dim),
++                "attention_multiplier": float(self.attention_multiplier),
++            },
++        }
++
++
++@contextmanager
++def capture_session(capture: MetalQKCapture) -> Iterator[MetalQKCapture]:
++    """Make a capture available to an attention adapter on the current context."""
++    token: Token[MetalQKCapture | None] = _ACTIVE_CAPTURE.set(capture)
++    try:
++        yield capture
++    finally:
++        _ACTIVE_CAPTURE.reset(token)
++
++
++def record_active_qk(layer_num: int, queries, keys) -> bool:
++    """Record Q/K into the current session; return False when capture is unarmed."""
++    capture = _ACTIVE_CAPTURE.get()
++    if capture is None:
++        return False
++    capture.record(layer_num, queries, keys)
++    return True
+diff --git a/pyproject.toml b/pyproject.toml
+index 028c317..04e3113 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -34,6 +34,13 @@ cuda = [
+     "zstandard==0.25.0",
+ ]
+ 
++# Apple Silicon vLLM-Metal stack. Keep CPU/CUDA profiles and their pins intact.
++metal = [
++    "mlx",
++    "mlx-lm",
++    "vllm-metal",
++]
++
+ [dependency-groups]
+ test = ["pytest"]
+ # Same-machine numerical comparison runner shares the existing test tools.
+@@ -61,6 +68,8 @@ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854
+ # These profiles are deliberately separate, even on a CUDA-capable CPU host.
+ conflicts = [
+     [{ extra = "cpu" }, { extra = "cuda" }],
++    [{ extra = "cpu" }, { extra = "metal" }],
++    [{ extra = "cuda" }, { extra = "metal" }],
+ ]
+ 
+ [tool.uv.sources]
+diff --git a/tests/backends/test_metal_qk.py b/tests/backends/test_metal_qk.py
+new file mode 100644
+index 0000000..6033a2c
+--- /dev/null
++++ b/tests/backends/test_metal_qk.py
+@@ -0,0 +1,62 @@
++import numpy as np
++import pytest
++import torch
++
++from mia.backends.metal_qk import (
++    MetalQKCapture,
++    capture_session,
++    record_active_qk,
++)
++
++
++def test_capture_produces_existing_qk_probe_contract():
++    capture = MetalQKCapture(
++        num_attention_heads=2,
++        num_key_value_heads=1,
++        head_dim=2,
++        attention_multiplier=2**-0.5,
++    )
++    q = np.arange(8, dtype=np.float32).reshape(1, 2, 2, 2)
++    k = np.arange(12, dtype=np.float32).reshape(1, 1, 6, 2)
++
++    with capture_session(capture):
++        assert record_active_qk(3, q, k)
++    probes = capture.to_probes()
++
++    entry = probes["qk_cache"]["model.layers.3.self_attn.attn"]
++    assert entry["hookq_mode"] == "last_token"
++    assert entry["q"][0].shape == (4,)
++    assert entry["k_all"][0].shape == (6, 2)
++    assert torch.equal(entry["q"][0], torch.tensor([2.0, 3.0, 6.0, 7.0]))
++    assert probes["config"]["num_attention_heads"] == 2
++    assert probes["config"]["num_key_value_heads"] == 1
++    assert not record_active_qk(3, q, k)
++
++
++def test_capture_keeps_first_prefix_for_each_layer():
++    capture = MetalQKCapture(1, 1, 2, 2**-0.5)
++    first_q = np.ones((1, 1, 2, 2), dtype=np.float32)
++    first_k = np.ones((1, 1, 2, 2), dtype=np.float32)
++    later_k = np.full((1, 1, 3, 2), 9, dtype=np.float32)
++
++    capture.record(0, first_q, first_k)
++    capture.record(0, first_q, later_k)
++
++    entry = capture.to_probes()["qk_cache"]["model.layers.0.self_attn.attn"]
++    assert entry["k_all"][0].shape == (2, 2)
++    assert torch.equal(entry["k_all"][0], torch.ones((2, 2)))
++
++
++@pytest.mark.parametrize(
++    "q,k",
++    [
++        (np.zeros((2, 2, 1, 2)), np.zeros((2, 1, 1, 2))),
++        (np.zeros((1, 3, 1, 2)), np.zeros((1, 1, 1, 2))),
++        (np.zeros((1, 2, 1, 3)), np.zeros((1, 1, 1, 2))),
++        (np.zeros((1, 2, 1, 2)), np.zeros((1, 1, 1, 3))),
++    ],
++)
++def test_capture_rejects_mismatched_target_arrays(q, k):
++    capture = MetalQKCapture(2, 1, 2, 2**-0.5)
++    with pytest.raises(ValueError):
++        capture.record(0, q, k)
