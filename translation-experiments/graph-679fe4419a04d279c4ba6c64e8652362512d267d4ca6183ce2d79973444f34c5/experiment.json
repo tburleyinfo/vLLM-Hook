@@ -1,0 +1,44 @@
+{
+  "condition": "graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "full-fresh-20261113-08",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Qwen2-1.5B-Instruct.json)",
+  "patch_sha256": "679fe4419a04d279c4ba6c64e8652362512d267d4ca6183ce2d79973444f34c5",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 441.1,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "attention_tracker_metal.md": "2dd843580b6b8a6639c90165478031de6a006b14133bce04a5dd9d44d539478d",
+      "completion.json": "758a6f293ac4a67515bde9f6e4ba79d625fc4c34fb40977dbaa3307c910c0023"
+    },
+    "patch_sha256": "679fe4419a04d279c4ba6c64e8652362512d267d4ca6183ce2d79973444f34c5",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Run focused Metal backend tests and the Attention Tracker demo on Apple Silicon with vLLM-Metal.",
+      "Validate save_to_disk artifact lifecycle and batched/decode capture on the target runtime.",
+      "Implement and test Metal activation steering, hidden-state capture, score-only Q/K capture, and paged-attention Q/K capture before claiming those repository capabilities are translated."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Qwen2-1.5B-Instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}

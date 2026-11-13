@@ -121,6 +121,13 @@ class MiaLLM:
         worker = analyzer_entry = None
         if worker_name or analyzer_name:
             vllm.plugins.load_general_plugins()
+            from mia import register_plugins
+            register_plugins()
+            # VLLM_PLUGINS may intentionally select only the platform plugin
+            # (for example, "metal"). MIA's public wrapper still needs its
+            # engine integration registered in that configuration.
+            from mia.core._plugin import register as register_mia_plugin
+            register_mia_plugin()
         if worker_name:
             worker_entry = PluginRegistry.get_worker(worker_name)
             if worker_entry is None:
@@ -409,4 +416,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-
