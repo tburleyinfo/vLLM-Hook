@@ -157,6 +157,9 @@ class SteerWorker:
             return
         self._hooks_installed = True
         runner = self.model_runner
+        from mia.backends.metal import install_metal_steering
+        if install_metal_steering(self):
+            return
         require_v2_runner(runner)
         # lazy: keep mia.core.runtime out of import mia
         from mia.core.runtime.tp_shard import refuse_pipeline_parallel
@@ -302,4 +305,3 @@ class SteerWorker:
         # lazy: keep mia.core.hooks (reads env at import) out of import mia
         from mia.core.hooks.install_steer import install_steer_hosts
         install_steer_hosts(self)
-

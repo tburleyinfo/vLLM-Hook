@@ -1,0 +1,7 @@
+{
+  "status": "incomplete",
+  "remaining_work": [
+    "Implement and preserve Q/K capture semantics for decode, batched/chunked, paged-attention, and durable/on-disk capture paths.",
+    "Run the added tests and validate the Metal Q/K capture and steering bridges, dependency extra, and end-to-end Attention Tracker flow on a compatible Apple Silicon vLLM-Metal environment."
+  ]
+}

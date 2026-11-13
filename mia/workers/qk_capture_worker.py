@@ -321,6 +321,11 @@ class QKCaptureWorker:
             return
         self._hooks_installed = True
         runner = self.model_runner
+        # vLLM-Metal owns an MLX model runner rather than a vLLM Torch V2 runner.
+        # Keep its request-scoped Q/K path separate from the CPU/CUDA hooks.
+        from mia.backends.metal import install_metal_qk_capture
+        if install_metal_qk_capture(self):
+            return
         require_v2_runner(runner)
         stash = install_request_arg_stash(runner)
         self._step = None
@@ -1045,4 +1050,3 @@ class QKCaptureWorker:
         # lazy: keep mia.core.delivery out of import mia
         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
-
