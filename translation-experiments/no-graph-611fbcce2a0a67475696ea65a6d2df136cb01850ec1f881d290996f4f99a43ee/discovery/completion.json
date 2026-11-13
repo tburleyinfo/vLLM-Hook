@@ -1,0 +1,1 @@
+{"status":"incomplete","remaining_work":["Run the new Q/K layout tests and an end-to-end Apple Silicon vLLM-Metal Attention Tracker test, including multiprompt ordering, disk artifact analysis, steering output, and hook cleanup.","Implement and validate hidden-state capture and non-Qwen2 model support if those repository APIs are required on vLLM-Metal."]}

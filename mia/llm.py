@@ -121,11 +121,21 @@ class MiaLLM:
         worker = analyzer_entry = None
         if worker_name or analyzer_name:
             vllm.plugins.load_general_plugins()
+        metal_enabled = "metal" in {
+            name.strip().lower()
+            for name in os.environ.get("VLLM_PLUGINS", "").split(",")
+            if name.strip()
+        }
         if worker_name:
             worker_entry = PluginRegistry.get_worker(worker_name)
             if worker_entry is None:
                 raise ValueError(f"Unknown worker: {worker_name!r}. "
                                  f"Available: {PluginRegistry.list_workers()}")
+            if metal_enabled and worker_name not in ("capture_qk", "steer"):
+                raise ValueError(
+                    f"Worker {worker_name!r} has no vLLM-Metal implementation. "
+                    "Metal currently supports capture_qk and steer."
+                )
             worker = worker_entry.path
         if analyzer_name:
             analyzer_entry = PluginRegistry.get_analyzer(analyzer_name)
@@ -136,6 +146,10 @@ class MiaLLM:
         llm_kwargs = dict(vllm_kwargs)
         if download_dir is not None:
             llm_kwargs['download_dir'] = download_dir
+        if metal_enabled:
+            # vLLM-Metal executes MLX models rather than vLLM's torch Worker
+            # extension interface; MIA instruments its Qwen2 forward path.
+            worker = None
         # lazy: keep mia.core._plugin and mia.core.hooks out of import mia
         from mia.core._plugin import engine_hints
         with engine_hints(qk_score=self._qk_capture == "score"):
@@ -148,6 +162,7 @@ class MiaLLM:
 
         self.tokenizer = self.llm.get_tokenizer()
         self.llm_engine = self.llm.llm_engine
+        self._metal_enabled = metal_enabled
 
         self._model_dims = None
         try:
@@ -348,15 +363,73 @@ class MiaLLM:
                                     "min_p", "n", "seed", "stop", "stop_token_ids",
                                     "presence_penalty", "frequency_penalty",
                                     "repetition_penalty")}
-        PROF.incr("miallm.generate.calls")
-        PROF.gauge("miallm.prompts", len(prompts))
-        with PROF.timed("miallm.generate"):
-            if all(sp is sp_list[0] for sp in sp_list):
-                outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
-            else:
-                outputs = self.llm.generate(prompts, sp_list, **passthrough)
+        metal_session = None
+        if hook and self._metal_enabled and self.worker_name in ("capture_qk", "steer"):
+            from mia.backends.vllm_metal import instrument_qwen2
 
-        if hook and self.worker_name and not save_to_disk:
+            prompt_lens = [self._prompt_token_len(prompt) for prompt in prompts]
+            if any(length is None for length in prompt_lens):
+                raise ValueError(
+                    "vLLM-Metal MIA instrumentation needs token lengths for every prompt"
+                )
+            request_configs = [
+                dict(sp.extra_args or {})
+                for sp in sp_list
+            ]
+            capture_modes = {
+                config.get("qk_capture", self._qk_capture)
+                for config in request_configs
+            }
+            if len(capture_modes) != 1:
+                raise ValueError(
+                    "A vLLM-Metal generate batch must use one qk_capture mode"
+                )
+            selected_layers = set(self.layer_to_heads) or None
+            with instrument_qwen2(
+                prompts=prompts,
+                prompt_lens=[int(length) for length in prompt_lens],
+                output_layers=selected_layers,
+                hookq_mode=self._hookq_mode,
+                configs=request_configs,
+                capture_qk=self.worker_name == "capture_qk",
+                capture_mode=next(iter(capture_modes)),
+                layer_to_heads=self.layer_to_heads,
+            ) as metal_session:
+                PROF.incr("miallm.generate.calls")
+                PROF.gauge("miallm.prompts", len(prompts))
+                with PROF.timed("miallm.generate"):
+                    if all(sp is sp_list[0] for sp in sp_list):
+                        outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+                    else:
+                        outputs = self.llm.generate(prompts, sp_list, **passthrough)
+            if self.worker_name == "capture_qk":
+                metal_probes = metal_session.probes()
+                if save_to_disk:
+                    from mia.core.delivery.artifact_writer import write_artifact
+
+                    write_artifact(
+                        "qk",
+                        metal_probes,
+                        os.path.join(self._hook_dir, str(run_id)),
+                        self._hookq_mode,
+                        0,
+                        use_safetensors=False,
+                        force_pt=True,
+                        pt_filename="qk.pt",
+                    )
+                elif outputs:
+                    outputs[0].probes = metal_probes
+        else:
+            PROF.incr("miallm.generate.calls")
+            PROF.gauge("miallm.prompts", len(prompts))
+            with PROF.timed("miallm.generate"):
+                if all(sp is sp_list[0] for sp in sp_list):
+                    outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+                else:
+                    outputs = self.llm.generate(prompts, sp_list, **passthrough)
+
+        if (hook and self.worker_name and not save_to_disk
+                and not (self._metal_enabled and self.worker_name == "capture_qk")):
             # lazy: keep mia.core.delivery out of import mia
             from mia.core.delivery.delivered_probes import attach_lazy, merge_source, pending
             srcs = [merge_source(o) for o in outputs]
@@ -409,4 +482,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-
