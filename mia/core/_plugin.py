@@ -1206,6 +1206,13 @@ def _patched_create_engine_config(self, *args, **kwargs):
         worker_type = parse_mia_worker_env(os.environ.get("MIA_WORKER")) or DEFAULT_MIA_WORKER
         self.worker_extension_cls = _WORKER_EXT_BY_KIND[worker_type]
     _wkind = _worker_kind(self.worker_extension_cls)
+    metal_qk = (_wkind == "qk" and "metal" in {
+        item.strip() for item in os.environ.get("VLLM_PLUGINS", "").split(",")
+    })
+    if metal_qk:
+        # vLLM-Metal owns its worker class; its MIA hook is installed directly
+        # on MetalWorker rather than through vLLM's worker-extension mixin.
+        self.worker_extension_cls = None
 
     if os.environ.get("VLLM_USE_V2_MODEL_RUNNER") == "0":
         raise RuntimeError(
@@ -1223,7 +1230,29 @@ def _patched_create_engine_config(self, *args, **kwargs):
         _revert_mia_writes()
     else:
         _drop_inherited_delivery()
-    mode = resolve_capture_mode(self, os.environ, _ENGINE_HINTS.get(), kind=_wkind)
+    if metal_qk:
+        if os.environ.get("MIA_ALLOW_CUDAGRAPH") == "1":
+            raise MiaConfigurationError(
+                "MIA_ALLOW_CUDAGRAPH=1 is a CUDA capture mode and cannot be used "
+                "with the vLLM-Metal MLX Attention Tracker backend."
+            )
+        prefix_cache = getattr(self, "enable_prefix_caching", None)
+        if prefix_cache is True:
+            raise MiaConfigurationError(
+                "The vLLM-Metal Granite Q/K capture path requires prefix caching "
+                "to be disabled so captured keys cover the full prompt."
+            )
+        self.enforce_eager = True
+        if prefix_cache is None:
+            self.enable_prefix_caching = False
+        mode = CaptureMode(
+            False, True, "scope", "vLLM-Metal MLX capture",
+            prefix_caching_off=prefix_cache is None,
+        )
+        from mia.core.hooks.install import set_graph_mode
+        set_graph_mode(False)
+    else:
+        mode = resolve_capture_mode(self, os.environ, _ENGINE_HINTS.get(), kind=_wkind)
     graph_mode = mode.graph
     # lazy: graph install code (reads env at import) stays out of import mia.core._plugin
     from mia.core.hooks.install import set_graph_mode
@@ -1290,6 +1319,12 @@ def _patched_create_engine_config(self, *args, **kwargs):
 
     assert _original_create_engine_config is not None
     config = _original_create_engine_config(self, *args, **kwargs)
+    if metal_qk:
+        additional_config = getattr(config, "additional_config", None)
+        if not isinstance(additional_config, dict):
+            additional_config = {}
+            config.additional_config = additional_config
+        additional_config["mia_worker_kind"] = "qk"
 
     resolved = _cudagraph_mode_name(config.compilation_config.cudagraph_mode)
     validate_graph_mode(resolved)
@@ -1686,6 +1721,8 @@ def _engine_worker_kind(engine) -> str:
     """Worker kind ``engine`` was built with: cache stamp, else MIA class, else ``_worker_kind``."""
     vc = getattr(engine, "vllm_config", None)
     ac = getattr(vc, "additional_config", None)
+    if isinstance(ac, dict) and ac.get("mia_worker_kind") in _WORKER_EXT_BY_KIND:
+        return ac["mia_worker_kind"]
     stamp = ac.get(_COMPILE_CACHE_STAMP_KEY) if isinstance(ac, dict) else None
     if isinstance(stamp, dict) and stamp.get("worker") in _WORKER_EXT_BY_KIND:
         return stamp["worker"]
@@ -1848,6 +1885,13 @@ async def _patched_generate(
     wants_hs = extra.get("output_hidden_states") is not None
     wants_qk = extra.get("output_qk") is not None
     wants_steer = isinstance(extra.get("steer"), dict)
+    metal_qk = (
+        wants_qk
+        and _engine_worker_kind(self) == "qk"
+        and "metal" in {
+            item.strip() for item in os.environ.get("VLLM_PLUGINS", "").split(",")
+        }
+    )
     needs_hooks = wants_hs or wants_qk or wants_steer
     save_to_disk = bool(extra.get("save_to_disk"))
     _explicit_std = bool(extra["save_to_disk"]) if "save_to_disk" in extra else None
@@ -1956,6 +2000,8 @@ async def _patched_generate(
                 _emit_capture_evidence(self, output, extra, wants_hs, wants_qk, _hook_gen_toks)
             elif output.finished and wants_steer:
                 PROF.incr("steer.fire")
+            elif output.finished and metal_qk:
+                PROF.incr("metal.qk.capture_deferred")
             elif output.finished and needs_hooks and not wants_steer:
                 sink = _resolve_sink(extra)
                 if sink == "drop":
@@ -2035,10 +2081,10 @@ async def _patched_generate(
                         _writer_ends_turn = True
             yield output
     finally:
-        if needs_hooks and not _writer_ends_turn:
+        if needs_hooks and not _writer_ends_turn and not metal_qk:
             _end_completion_turn(extra, request_id)    # frees the next prompt's run write
         _release_steer(self, _steer_new, admitted=False)
-        if needs_hooks and not wants_steer and not _hybrid:
+        if needs_hooks and not wants_steer and not _hybrid and not metal_qk:
             await self.collective_rpc("clear_captured_states", args=(request_id,))
             if _aperture_per_request_mode(self) and ((wants_hs and not wants_qk)
                                              or (wants_qk and not wants_hs)):
@@ -2662,6 +2708,13 @@ def register() -> None:
 
     _apply_delivery_selector()
 
+    try:
+        from mia.backends.metal.attntracker import install_metal_worker_hook
+        install_metal_worker_hook()
+    except ImportError:
+        if "metal" in {item.strip() for item in os.environ.get("VLLM_PLUGINS", "").split(",")}:
+            raise
+
     # lazy: AsyncLLM, InputProcessor and graph install code load only when register() runs
     from vllm.v1.engine.async_llm import AsyncLLM
     from vllm.v1.engine.input_processor import InputProcessor
@@ -2725,4 +2778,3 @@ def register() -> None:
             break
         except Exception:
             pass
-

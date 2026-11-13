@@ -351,7 +351,49 @@ class MiaLLM:
         PROF.incr("miallm.generate.calls")
         PROF.gauge("miallm.prompts", len(prompts))
         with PROF.timed("miallm.generate"):
-            if all(sp is sp_list[0] for sp in sp_list):
+            metal_session = None
+            if (hook and self.worker_name == "capture_qk"
+                    and os.environ.get("MIA_SINK", "").lower() != "drop"):
+                from mia.backends.metal.attntracker import (
+                    MetalQKCaptureSession,
+                    metal_plugin_enabled,
+                )
+                if metal_plugin_enabled():
+                    engine_model_config = self.llm_engine.model_config
+                    model_config = getattr(engine_model_config, "hf_text_config", None)
+                    if model_config is None:
+                        hf_config = getattr(engine_model_config, "hf_config", None)
+                        model_config = getattr(hf_config, "text_config", hf_config)
+                    if model_config is None:
+                        raise RuntimeError(
+                            "vLLM-Metal Attention Tracker needs the Granite text "
+                            "model configuration."
+                        )
+                    metal_session = MetalQKCaptureSession(
+                        self.layer_to_heads, model_config, expected_prompts=len(prompts)
+                    )
+            if metal_session is not None:
+                with metal_session:
+                    if all(sp is sp_list[0] for sp in sp_list):
+                        outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+                    else:
+                        outputs = self.llm.generate(prompts, sp_list, **passthrough)
+                prompt_probes = metal_session.probes()
+                if len(prompt_probes) != len(outputs):
+                    raise RuntimeError(
+                        "vLLM-Metal returned a different number of prompt outputs "
+                        f"({len(outputs)}) than captured ({len(prompt_probes)})."
+                    )
+                merged_probes = (
+                    _merge_probes(prompt_probes) if len(prompt_probes) > 1
+                    else prompt_probes[0]
+                )
+                if save_to_disk:
+                    from mia.backends.metal.attntracker import write_qk_artifact
+                    write_qk_artifact(merged_probes, self._hook_dir, run_id)
+                else:
+                    outputs[0].probes = _dequantized(merged_probes)
+            elif all(sp is sp_list[0] for sp in sp_list):
                 outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
             else:
                 outputs = self.llm.generate(prompts, sp_list, **passthrough)
@@ -409,4 +451,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-
