@@ -34,6 +34,13 @@ cuda = [
     "zstandard==0.25.0",
 ]
 
+# vLLM-Metal is a separate Apple-Silicon backend; CPU/CUDA profiles remain
+# unchanged and may not be combined with this profile in one environment.
+metal = [
+    "vllm==0.29.0",
+    "vllm-metal==0.2.0",
+]
+
 [dependency-groups]
 test = ["pytest"]
 # Same-machine numerical comparison runner shares the existing test tools.
@@ -61,6 +68,8 @@ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854
 # These profiles are deliberately separate, even on a CUDA-capable CPU host.
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
+    [{ extra = "metal" }, { extra = "cpu" }],
+    [{ extra = "metal" }, { extra = "cuda" }],
 ]
 
 [tool.uv.sources]
