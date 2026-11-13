@@ -94,6 +94,11 @@ class MiaLLM:
         self.analyzer_name = analyzer_name
         self.enable_hook = enable_hook
         self.enforce_eager = enforce_eager
+        self._metal_qk = False
+        if worker_name == "capture_qk":
+            from mia.backends.vllm_metal.qk_capture import metal_plugin_requested
+
+            self._metal_qk = metal_plugin_requested()
 
         if download_dir is not None:
             download_dir = os.path.expanduser(download_dir)
@@ -126,7 +131,11 @@ class MiaLLM:
             if worker_entry is None:
                 raise ValueError(f"Unknown worker: {worker_name!r}. "
                                  f"Available: {PluginRegistry.list_workers()}")
-            worker = worker_entry.path
+            if self._metal_qk:
+                from mia.backends.vllm_metal import install_qk_capture
+                install_qk_capture()
+            else:
+                worker = worker_entry.path
         if analyzer_name:
             analyzer_entry = PluginRegistry.get_analyzer(analyzer_name)
             if analyzer_entry is None:
@@ -315,7 +324,7 @@ class MiaLLM:
         else:
             sp_list = [sampling_params] * len(prompts)
 
-        if hook and self.worker_name:
+        if hook and self.worker_name and not self._metal_qk:
             if run_id is None:
                 run_id = str(uuid.uuid4())
             with PROF.timed("miallm.build_extra"):
@@ -334,6 +343,10 @@ class MiaLLM:
                     new_sp_list.append(sp)
                 sp_list = new_sp_list
             self._last_run_id = run_id
+        elif hook and self._metal_qk:
+            if run_id is None:
+                run_id = str(uuid.uuid4())
+            self._last_run_id = run_id
         else:
             new_sp_list = []
             for sp in sp_list:
@@ -350,13 +363,33 @@ class MiaLLM:
                                     "repetition_penalty")}
         PROF.incr("miallm.generate.calls")
         PROF.gauge("miallm.prompts", len(prompts))
-        with PROF.timed("miallm.generate"):
-            if all(sp is sp_list[0] for sp in sp_list):
-                outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
-            else:
-                outputs = self.llm.generate(prompts, sp_list, **passthrough)
+        if hook and self._metal_qk:
+            from mia.backends.vllm_metal import MetalQKCaptureSession
 
-        if hook and self.worker_name and not save_to_disk:
+            capture = MetalQKCaptureSession(
+                layer_to_heads=self.layer_to_heads,
+                prompt_count=len(prompts),
+            )
+            with PROF.timed("miallm.generate"), capture:
+                if all(sp is sp_list[0] for sp in sp_list):
+                    outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+                else:
+                    outputs = self.llm.generate(prompts, sp_list, **passthrough)
+            probes = capture.to_probes()
+            if save_to_disk:
+                from mia.backends.vllm_metal.qk_capture import write_qk_run
+
+                write_qk_run(self._hook_dir, run_id, probes)
+            elif outputs:
+                outputs[0].probes = probes
+        else:
+            with PROF.timed("miallm.generate"):
+                if all(sp is sp_list[0] for sp in sp_list):
+                    outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+                else:
+                    outputs = self.llm.generate(prompts, sp_list, **passthrough)
+
+        if hook and self.worker_name and not self._metal_qk and not save_to_disk:
             # lazy: keep mia.core.delivery out of import mia
             from mia.core.delivery.delivered_probes import attach_lazy, merge_source, pending
             srcs = [merge_source(o) for o in outputs]
@@ -409,4 +442,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-
