@@ -1097,6 +1097,20 @@ def resolve_capture_mode(engine_args, env, hints=None, *, kind: str) -> CaptureM
     explicit = capture_mode_from_env(env)
     eager_arg = bool(getattr(engine_args, "enforce_eager", False))
     o0 = _is_o0(engine_args)
+    plugins = (plugin.strip() for plugin in (env.get("VLLM_PLUGINS") or "").split(","))
+    if "metal" in plugins:
+        if explicit is True:
+            raise MiaConfigurationError(
+                "MIA CUDA-graph capture cannot run on vLLM-Metal's MLX backend. "
+                "Unset MIA_ALLOW_CUDAGRAPH or set it to 0."
+            )
+        return CaptureMode(
+            False,
+            True,
+            "backend",
+            "VLLM_PLUGINS=metal uses the MLX runner; CUDA-graph hooks are disabled",
+            prefix_caching_off=_qk_prefix_unset(engine_args, kind),
+        )
     if explicit is True:
         why = ("MIA_ALLOW_CUDAGRAPH=1" + (", enforce_eager=True" if eager_arg else "")
                + (", optimization_level=O0" if o0 else ""))
@@ -2725,4 +2739,3 @@ def register() -> None:
             break
         except Exception:
             pass
-
