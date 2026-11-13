@@ -1,0 +1,9 @@
+{
+  "status": "incomplete",
+  "remaining_work": [
+    "Run the added targeted tests and Attention Tracker use case on Apple Silicon with vLLM-Metal.",
+    "Verify Metal Q/K probe delivery, analysis, disk persistence, and cleanup at runtime.",
+    "Verify Metal activation steering on a supported model for batched and sequential decode.",
+    "Implement and test Q/K capture and steering when vLLM-Metal paged attention is enabled."
+  ]
+}

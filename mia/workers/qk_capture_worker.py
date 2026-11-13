@@ -319,6 +319,16 @@ class QKCaptureWorker:
         """Install forward hooks on all target attention modules."""
         if self._hooks_installed:
             return
+        # vLLM-Metal executes MLX modules rather than torch modules. Keep its
+        # callable-module patching isolated from the existing CPU/CUDA hooks.
+        from mia.backends.vllm_metal import (
+            install_metal_qk_capture,
+            is_metal_runner,
+        )
+        if is_metal_runner(self.model_runner):
+            install_metal_qk_capture(self)
+            self._hooks_installed = True
+            return
         self._hooks_installed = True
         runner = self.model_runner
         require_v2_runner(runner)
@@ -1045,4 +1055,3 @@ class QKCaptureWorker:
         # lazy: keep mia.core.delivery out of import mia
         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
-

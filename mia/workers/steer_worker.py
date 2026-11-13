@@ -155,6 +155,16 @@ class SteerWorker:
         """Install steering hooks on every transformer layer."""
         if self._hooks_installed:
             return
+        # vLLM-Metal uses MLX callable modules; do not route them through
+        # torch's forward-hook path below.
+        from mia.backends.vllm_metal import (
+            install_metal_steering,
+            is_metal_runner,
+        )
+        if is_metal_runner(self.model_runner):
+            install_metal_steering(self)
+            self._hooks_installed = True
+            return
         self._hooks_installed = True
         runner = self.model_runner
         require_v2_runner(runner)
@@ -302,4 +312,3 @@ class SteerWorker:
         # lazy: keep mia.core.hooks (reads env at import) out of import mia
         from mia.core.hooks.install_steer import install_steer_hosts
         install_steer_hosts(self)
-

@@ -1,0 +1,26 @@
+{
+  "condition": "graph",
+  "patch_sha256": "8f4ec7bbb002b658e06351d7c5c20921c239631d094cd8ac707e959cc9d23360",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "validation": "skipped",
+  "pilot": true,
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Run the added targeted tests and Attention Tracker use case on Apple Silicon with vLLM-Metal.",
+      "Verify Metal Q/K probe delivery, analysis, disk persistence, and cleanup at runtime.",
+      "Verify Metal activation steering on a supported model for batched and sequential decode.",
+      "Implement and test Q/K capture and steering when vLLM-Metal paged attention is enabled."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/granite-3.1-8b-instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "experiment_id": "full-fresh-20261113-10",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/granite-3.1-8b-instruct.json)",
+  "runtime_validation_required": false,
+  "validator_sha256": "a96dd7b92f17f75f2d491f8d17d5057d68f43e2ece76c3275a12b78efdaf527c"
+}

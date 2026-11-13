@@ -63,7 +63,8 @@ def report(scores):
 def main():
     llm = MiaLLM(model=MODEL, worker_name="capture_qk", analyzer_name="attn_tracker",
                  config_file=CONFIG, hook_dir="/dev/shm/mia",
-                 gpu_memory_utilization=0.7, max_model_len=2048)
+                 gpu_memory_utilization=0.7, max_model_len=2048,
+                 enforce_eager=os.environ.get("MIA_DEMO_ENFORCE_EAGER") == "1")
 
     scores = []
     for case in TEST_CASES:

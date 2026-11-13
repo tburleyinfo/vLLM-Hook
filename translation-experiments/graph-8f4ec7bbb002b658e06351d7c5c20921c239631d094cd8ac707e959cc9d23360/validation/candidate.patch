@@ -1,0 +1,1055 @@
+diff --git a/TRANSLATION.md b/TRANSLATION.md
+new file mode 100644
+index 0000000..8406f2c
+--- /dev/null
++++ b/TRANSLATION.md
+@@ -0,0 +1,45 @@
++# vLLM-Metal translation
++
++## Implemented capabilities
++
++- Added an opt-in `metal` dependency profile alongside the existing CPU and
++  CUDA profiles.
++- Added a vLLM-Metal worker adapter for the non-paged MLX path. Q/K capture
++  wraps the model's callable attention modules, captures request-scoped
++  post-RoPE queries and keys, and uses the existing MIA worker result,
++  analyzer, and disk artifact contracts.
++- Added Metal activation steering at callable decoder-layer boundaries with
++  the existing `add_vector` and `adjust_rs` modes and phase/position
++  selection.
++- Made the analyzer select the final query row when callers provide
++  all-token Q captures; Attention Tracker remains a last-query analysis and
++  previously could not reshape an all-token query matrix.
++- Preserved the existing `MiaLLM`, worker and analyzer public interfaces and
++  left CPU/CUDA implementations in place.
++- Added runnable Attention Tracker instructions for
++  `notebooks/demo_attntracker_colab.ipynb`'s selected model configuration in
++  [docs/use_cases/attention_tracker_metal.md](docs/use_cases/attention_tracker_metal.md).
++
++## Checks performed
++
++- Inspected the selected Granite model configuration and notebook use-case
++  calls, repository worker/analyzer/probe-delivery code, supplied relationship
++  slices, and target vLLM-Metal's Granite, model runner, worker, attention
++  wrapper, and model lifecycle sources.
++- Added unit tests for MLX-to-CPU Q/K conversion, existing probe-contract
++  analysis, separation of in-memory versus disk capture buckets, and Metal
++  steering selection/modes.
++- The Metal extra pins `mlx-lm` to the inspected target source version 0.31.3;
++  MLX itself remains unpinned because no MLX package metadata was supplied.
++- No test suite or Apple Silicon runtime was executed in this environment.
++
++## Remaining work
++
++- Run the targeted tests and Attention Tracker demo on an Apple Silicon host
++  with the declared vLLM-Metal dependencies; verify model loading, generated
++  output, per-request probe delivery and cleanup.
++- Exercise the new Metal steering adapter against an actual supported model
++  and steering vector, including both batched and sequential decode.
++- The adapter currently targets the target library's non-paged model path;
++  Q/K and steering capture with vLLM-Metal paged attention remains to be
++  implemented and tested.
+diff --git a/docs/use_cases/attention_tracker_metal.md b/docs/use_cases/attention_tracker_metal.md
+new file mode 100644
+index 0000000..6bc51f7
+--- /dev/null
++++ b/docs/use_cases/attention_tracker_metal.md
+@@ -0,0 +1,50 @@
++# Attention Tracker on vLLM-Metal
++
++This note uses the existing `MiaLLM` API and the Granite 3.1 8B Attention
++Tracker configuration. It captures the configured heads' post-RoPE Q/K on the
++non-paged vLLM-Metal model path and runs the existing Attention Tracker
++analyzer. Generation is performed by vLLM with the Metal plugin; it does not
++use standalone MLX generation.
++
++On Apple Silicon, provision a Python environment with the repository's Metal
++extra and install the project:
++
++```bash
++uv sync --extra metal --group test
++```
++
++Set the plugin environment and run the existing demo from the repository root:
++
++```bash
++export VLLM_PLUGINS=metal
++export VLLM_ENABLE_V1_MULTIPROCESSING=0
++export VLLM_METAL_USE_PAGED_ATTENTION=0
++export VLLM_METAL_MEMORY_FRACTION=auto
++export MIA_DEMO_MODEL=ibm-granite/granite-3.1-8b-instruct
++export MIA_CONFIG_FILE=model_configs/attention_tracker/granite-3.1-8b-instruct.json
++export MIA_DEMO_ENFORCE_EAGER=1
++python examples/demo_attntracker.py
++```
++
++The demo emits generated text and one focus score for each of the original and
++injection-containing inputs, followed by their difference. Downloading model
++weights requires the normal model-cache access available on the machine. The
++8B model needs sufficient unified memory; use an appropriately sized Apple
++Silicon system.
++
++## Scope and implementation notes
++
++- The Metal Q/K worker attaches wrappers at the existing callable attention
++  modules and scopes capture to each non-paged prefill request. It stores Q/K
++  rows as CPU PyTorch tensors in the repository's current probe/artifact
++  contract, so `MiaLLM.generate`, `MiaLLM.analyze`, and existing disk flush
++  behavior continue to be the public surfaces.
++- The Metal steering worker wraps decoder layer callables and applies the
++  existing `add_vector` or `adjust_rs` steering semantics to configured
++  residual rows. CPU/CUDA worker paths are unchanged.
++- The Metal adapters intentionally reject paged attention at install time:
++  the target environment for this use case sets `VLLM_METAL_USE_PAGED_ATTENTION=0`.
++- Runtime verification on an Apple Silicon host is still needed for actual
++  vLLM-Metal model loading, probe delivery/cleanup and steering behavior. The
++  unit tests cover the probe shape/analysis contract, not the native Metal
++  runtime.
+diff --git a/examples/demo_attntracker.py b/examples/demo_attntracker.py
+index bde27fc..cc05368 100644
+--- a/examples/demo_attntracker.py
++++ b/examples/demo_attntracker.py
+@@ -63,7 +63,8 @@ def report(scores):
+ def main():
+     llm = MiaLLM(model=MODEL, worker_name="capture_qk", analyzer_name="attn_tracker",
+                  config_file=CONFIG, hook_dir="/dev/shm/mia",
+-                 gpu_memory_utilization=0.7, max_model_len=2048)
++                 gpu_memory_utilization=0.7, max_model_len=2048,
++                 enforce_eager=os.environ.get("MIA_DEMO_ENFORCE_EAGER") == "1")
+ 
+     scores = []
+     for case in TEST_CASES:
+diff --git a/mia/analyzers/attention_tracker_analyzer.py b/mia/analyzers/attention_tracker_analyzer.py
+index 3d39df3..652018c 100644
+--- a/mia/analyzers/attention_tracker_analyzer.py
++++ b/mia/analyzers/attention_tracker_analyzer.py
+@@ -81,6 +81,8 @@ class AttntrackerAnalyzer:
+             for i, (q_last, k_all) in enumerate(zip(q_list, k_list)):
+                 seq_len = k_all.shape[0]
+ 
++                if q_last.dim() == 2:
++                    q_last = q_last[-1]
+                 q_heads = q_last.view(config["num_attention_heads"], config["head_dim"])
+                 q_heads = q_heads.unsqueeze(0).unsqueeze(2)
+ 
+@@ -135,4 +137,3 @@ class AttntrackerAnalyzer:
+                 scores.extend(head_scores.tolist())
+             batch_scores.append(np.mean(scores))
+         return batch_scores
+-
+diff --git a/mia/backends/__init__.py b/mia/backends/__init__.py
+new file mode 100644
+index 0000000..2a0fecf
+--- /dev/null
++++ b/mia/backends/__init__.py
+@@ -0,0 +1 @@
++"""Backend-specific implementations used by MIA workers."""
+diff --git a/mia/backends/vllm_metal.py b/mia/backends/vllm_metal.py
+new file mode 100644
+index 0000000..71628a8
+--- /dev/null
++++ b/mia/backends/vllm_metal.py
+@@ -0,0 +1,547 @@
++"""MIA capture and steering adapters for vLLM-Metal's MLX model runner."""
++from __future__ import annotations
++
++import os
++from contextlib import contextmanager
++from typing import Any
++
++import numpy as np
++import torch
++
++
++def is_metal_runner(runner: Any) -> bool:
++    """Whether a runner is vLLM-Metal's MLX runner."""
++    return type(runner).__module__.startswith("vllm_metal.")
++
++
++def _model_layers(model: Any) -> list:
++    root = getattr(model, "language_model", model)
++    container = getattr(root, "model", root)
++    layers = getattr(container, "layers", None)
++    if layers is None:
++        raise RuntimeError(
++            f"vLLM-Metal model {type(model).__name__} exposes no transformer layers"
++        )
++    return layers
++
++
++def _model_args(runner: Any) -> dict:
++    args = getattr(runner, "model_args", None)
++    if not isinstance(args, dict) or not args:
++        raise RuntimeError("vLLM-Metal runner has no resolved model_args")
++    heads = args.get("num_attention_heads", args.get("n_heads"))
++    kv_heads = args.get("num_key_value_heads", args.get("n_kv_heads", heads))
++    hidden = args.get("hidden_size")
++    head_dim = args.get("head_dim")
++    if head_dim is None and hidden and heads:
++        head_dim = int(hidden) // int(heads)
++    if not heads or not kv_heads or not head_dim:
++        raise RuntimeError(
++            "Cannot resolve Q/K capture dimensions from vLLM-Metal model_args"
++        )
++    return {
++        "num_attention_heads": int(heads),
++        "num_key_value_heads": int(kv_heads),
++        "hidden_size": int(hidden or int(heads) * int(head_dim)),
++        "head_dim": int(head_dim),
++        "attention_multiplier": float(
++            args.get("attention_multiplier", 1.0 / np.sqrt(int(head_dim)))
++        ),
++    }
++
++
++def _requested_layers(spec: Any) -> set[int] | None:
++    if spec is True:
++        return None
++    if isinstance(spec, dict):
++        return {int(layer) for layer in spec}
++    if isinstance(spec, (list, tuple)):
++        return {int(layer) for layer in spec}
++    return set()
++
++
++def _to_cpu_tensor(value: Any, mx) -> torch.Tensor:
++    mx.eval(value)
++    compatible = np.asarray(value.astype(mx.float32))
++    return torch.from_numpy(np.array(compatible, dtype=np.float16, copy=True))
++
++
++def record_qk_rows(
++    worker: Any,
++    request_id: str,
++    layer_num: int,
++    module_name: str,
++    q_rows: torch.Tensor,
++    k_rows: torch.Tensor,
++    mode: str,
++    extra: dict,
++) -> None:
++    """Append one MLX forward's Q/K rows in the existing eager worker format."""
++    bucket = worker._disk_states if extra.get("save_to_disk") else worker._captured_states
++    states = bucket.setdefault(str(request_id), {})
++    entry = states.get(module_name)
++    if entry is None:
++        from mia.workers.qk_capture_worker import new_qk_entry
++
++        entry = new_qk_entry(layer_num, mode)
++        states[module_name] = entry
++    entry["q"].append(q_rows[-1] if mode == "last_token" else q_rows)
++    from mia.workers.qk_capture_worker import append_k_prefix
++
++    append_k_prefix(entry, k_rows)
++
++
++def _attention_name(layer: Any, layer_num: int) -> tuple[str, Any]:
++    for attr in ("self_attn", "attention"):
++        attn = getattr(layer, attr, None)
++        if attn is not None:
++            return attr, attn
++    raise RuntimeError(
++        f"vLLM-Metal transformer layer {layer_num} has no supported attention attribute"
++    )
++
++
++def _qk_capture(
++    worker: Any,
++    layer_num: int,
++    inner: Any,
++    x: Any,
++    cache: Any,
++    cache_offset: Any,
++    mx,
++) -> None:
++    active = getattr(worker, "_mia_metal_active", None)
++    if active is None or active["kind"] != "qk":
++        return
++    contexts = active.get("contexts") or []
++    if not contexts:
++        mapped = getattr(worker, "_mia_metal_cache_context", {}).get(id(cache))
++        contexts = [mapped] if mapped is not None else []
++    if not contexts:
++        return
++    args = worker._conf
++    batch, seq_len, _ = x.shape
++    if batch != len(contexts):
++        raise RuntimeError(
++            f"Metal Q/K capture has {batch} model rows for {len(contexts)} requests"
++        )
++    capture_rows = []
++    for batch_idx, context in enumerate(contexts):
++        if context is None:
++            continue
++        requested_layers = context["layers"]
++        if requested_layers is not None and layer_num not in requested_layers:
++            continue
++        if context["phase"] == "prefill" and context["hooks_on"] == "decode":
++            continue
++        if context["phase"] == "decode" and context["hooks_on"] == "prefill":
++            continue
++        capture_rows.append((batch_idx, context))
++    if not capture_rows:
++        return
++
++    q = inner.q_proj(x).reshape(
++        batch, seq_len, args["num_attention_heads"], args["head_dim"]
++    ).transpose(0, 2, 1, 3)
++    k_current = inner.k_proj(x).reshape(
++        batch, seq_len, args["num_key_value_heads"], args["head_dim"]
++    ).transpose(0, 2, 1, 3)
++    if cache is not None:
++        q = inner.rope(q, offset=cache_offset)
++        k_current = inner.rope(k_current, offset=cache_offset)
++    else:
++        q = inner.rope(q)
++        k_current = inner.rope(k_current)
++
++    cached_keys = getattr(cache, "keys", None) if cache is not None else None
++    for batch_idx, context in capture_rows:
++        if cached_keys is not None:
++            total_len = int(context["seq_len"])
++            k = cached_keys[batch_idx : batch_idx + 1, ..., :total_len, :]
++        elif context["cache_offset"] == 0:
++            k = k_current[batch_idx : batch_idx + 1]
++        else:
++            raise RuntimeError(
++                "Metal Q/K capture cannot reconstruct a pre-existing prefix from this KV cache"
++            )
++        q_rows = q[batch_idx].transpose(1, 0, 2).reshape(seq_len, -1)
++        k_rows = k[0].transpose(1, 0, 2).reshape(
++            -1, args["num_key_value_heads"] * args["head_dim"]
++        )
++        record_qk_rows(
++            worker,
++            context["request_id"],
++            layer_num,
++            f"model.layers.{layer_num}.self_attn.attn",
++            _to_cpu_tensor(q_rows, mx),
++            _to_cpu_tensor(k_rows, mx),
++            context["mode"],
++            context["extra"],
++        )
++
++
++def _wrap_qk_attention(inner: Any, worker: Any, layer_num: int, mx, nn):
++    class Wrapper(nn.Module):
++        def __init__(self):
++            super().__init__()
++            object.__setattr__(self, "_inner", inner)
++            object.__setattr__(self, "_worker", worker)
++            object.__setattr__(self, "_layer_num", layer_num)
++            object.__setattr__(self, "_mx", mx)
++            object.__setattr__(self, "_mia_metal_qk_wrapper", True)
++
++        def __call__(self, x, mask=None, cache=None, **kwargs):
++            cache_offset = getattr(cache, "offset", 0) if cache is not None else 0
++            result = self._inner(x, mask=mask, cache=cache, **kwargs)
++            _qk_capture(
++                self._worker,
++                self._layer_num,
++                self._inner,
++                x,
++                cache,
++                cache_offset,
++                self._mx,
++            )
++            return result
++
++    return Wrapper()
++
++
++def _request_extra(params: Any) -> dict:
++    return dict(getattr(params, "extra_args", None) or {})
++
++
++@contextmanager
++def _active_request(worker: Any, active: dict | None):
++    previous = getattr(worker, "_mia_metal_active", None)
++    worker._mia_metal_active = active
++    try:
++        yield
++    finally:
++        worker._mia_metal_active = previous
++
++
++def _wrap_runner_prefill(worker: Any, runner: Any) -> None:
++    if getattr(runner, "_mia_metal_prefill_wrapped", False):
++        return
++    original = runner._prefill_single
++
++    def wrapped(req_id, token_ids, sampling_params, *args, **kwargs):
++        extra = _request_extra(sampling_params)
++        requested = extra.get("output_qk")
++        active = None
++        if requested is not None:
++            active = {
++                "kind": "qk",
++                "contexts": [
++                    {
++                        "request_id": str(req_id),
++                        "layers": _requested_layers(requested),
++                        "mode": extra.get("hookq_mode", "all_tokens"),
++                        "hooks_on": extra.get("hooks_on", "prefill"),
++                        "phase": "prefill",
++                        "cache_offset": 0,
++                        "seq_len": len(token_ids),
++                        "extra": extra,
++                    }
++                ],
++            }
++        with _active_request(worker, active):
++            return original(req_id, token_ids, sampling_params, *args, **kwargs)
++
++    runner._prefill_single = wrapped
++    original_batch = runner._batched_decode
++
++    def batched(decode_reqs, *args, **kwargs):
++        contexts = []
++        for req_id, state in decode_reqs:
++            extra = _request_extra(state.sampling_params)
++            requested = extra.get("output_qk")
++            contexts.append(
++                None
++                if requested is None
++                else {
++                    "request_id": str(req_id),
++                    "layers": _requested_layers(requested),
++                    "mode": extra.get("hookq_mode", "all_tokens"),
++                    "hooks_on": extra.get("hooks_on", "prefill"),
++                    "phase": "decode",
++                    "cache_offset": len(state.token_ids) - 1,
++                    "seq_len": len(state.token_ids),
++                    "extra": extra,
++                }
++            )
++        active = {"kind": "qk", "contexts": contexts}
++        with _active_request(worker, active):
++            return original_batch(decode_reqs, *args, **kwargs)
++
++    runner._batched_decode = batched
++
++    original_sequential = runner._sequential_decode
++
++    def sequential(decode_reqs, *args, **kwargs):
++        cache_context = {}
++        for req_id, state in decode_reqs:
++            extra = _request_extra(state.sampling_params)
++            requested = extra.get("output_qk")
++            if requested is None:
++                continue
++            context = {
++                "request_id": str(req_id),
++                "layers": _requested_layers(requested),
++                "mode": extra.get("hookq_mode", "all_tokens"),
++                "hooks_on": extra.get("hooks_on", "prefill"),
++                "phase": "decode",
++                "cache_offset": len(state.token_ids) - 1,
++                "seq_len": len(state.token_ids),
++                "extra": extra,
++            }
++            for layer_cache in state.cache:
++                cache_context[id(layer_cache)] = context
++        previous = getattr(worker, "_mia_metal_cache_context", {})
++        worker._mia_metal_cache_context = cache_context
++        with _active_request(worker, {"kind": "qk", "contexts": []}):
++            try:
++                return original_sequential(decode_reqs, *args, **kwargs)
++            finally:
++                worker._mia_metal_cache_context = previous
++
++    runner._sequential_decode = sequential
++    runner._mia_metal_prefill_wrapped = True
++
++
++def install_metal_qk_capture(worker: Any) -> None:
++    """Install request-scoped Q/K capture on a vLLM-Metal model."""
++    import mlx.core as mx
++    import mlx.nn as nn
++
++    runner = worker.model_runner
++    if getattr(runner, "_paged_attention_runtime", None) is not None:
++        raise RuntimeError(
++            "MIA's vLLM-Metal Q/K adapter requires the non-paged MLX path "
++            "(VLLM_METAL_USE_PAGED_ATTENTION=0)"
++        )
++    model = getattr(runner, "model", None)
++    if model is None:
++        raise RuntimeError("Cannot install Metal Q/K capture before the model is loaded")
++    worker._conf = _model_args(runner)
++    worker._captured_states = {}
++    worker._disk_states = {}
++    worker._artifact_tag = None
++    worker._artifact_gran = None
++    worker._artifact_gsize = None
++    worker.hookq_mode = "all_tokens"
++    layers = _model_layers(model)
++    for layer_num, layer in enumerate(layers):
++        attr, attention = _attention_name(layer, layer_num)
++        if not hasattr(attention, "q_proj") or not hasattr(attention, "k_proj") \
++                or not hasattr(attention, "rope"):
++            raise RuntimeError(
++                f"Metal Q/K capture does not recognize layer {layer_num} "
++                f"({type(attention).__name__})"
++            )
++        if not getattr(attention, "_mia_metal_qk_wrapper", False):
++            wrapper = _wrap_qk_attention(attention, worker, layer_num, mx, nn)
++            setattr(layer, attr, wrapper)
++    _wrap_runner_prefill(worker, runner)
++    worker._mia_metal_qk = True
++
++
++def _steer_config_for(context: dict, layer_num: int) -> dict | None:
++    from mia.workers.steer_worker import _steer_targets_layer
++
++    config = context.get("steer")
++    if not isinstance(config, dict):
++        return None
++    if not _steer_targets_layer(config.get("optimal_layer", -1), layer_num):
++        return None
++    return config
++
++
++def _steering_data(worker: Any, config: dict, mx) -> tuple[Any, Any]:
++    from mia.workers.steer_worker import _load_steering_vector
++
++    path = config.get("vector_path")
++    if not path:
++        raise ValueError("Metal steering requires steering.vector_path")
++    cache = worker._mia_metal_steer_vectors
++    data = cache.get(path)
++    if data is None:
++        raw = _load_steering_vector(path)
++        direction = raw["dir"]
++        if torch.is_tensor(direction):
++            direction = direction.detach().cpu().numpy()
++        direction = mx.array(np.asarray(direction, dtype=np.float32))
++        average = raw.get("avg_proj")
++        if torch.is_tensor(average):
++            average = average.detach().cpu().numpy()
++        average = None if average is None else mx.array(np.asarray(average, dtype=np.float32))
++        data = (direction, average)
++        cache[path] = data
++    return data
++
++
++def _apply_steering(worker: Any, layer_num: int, output: Any, cache: Any, mx) -> Any:
++    active = getattr(worker, "_mia_metal_active", None)
++    if active is None or active["kind"] != "steer":
++        cache_context = getattr(worker, "_mia_metal_cache_context", {})
++        context = cache_context.get(id(cache))
++        contexts = [context] if context is not None else []
++    else:
++        contexts = active["contexts"]
++    if not contexts:
++        return output
++    from mia.workers.steer_worker import resolve_steer_modes, steer_span
++
++    if len(output.shape) != 3 or output.shape[0] != len(contexts):
++        raise RuntimeError(
++            f"Metal steering layer {layer_num} output shape {tuple(output.shape)} "
++            f"does not match {len(contexts)} active request(s)"
++        )
++    result = output
++    for batch_idx, context in enumerate(contexts):
++        config = _steer_config_for(context, layer_num)
++        if config is None:
++            continue
++        try:
++            phase, positions = resolve_steer_modes(config)
++        except ValueError as exc:
++            warned = getattr(worker, "_bad_cfg_warned", 0)
++            if warned < 4:
++                worker._bad_cfg_warned = warned + 1
++                print(
++                    f"[steer] ignoring request with invalid steer config: {exc}",
++                    flush=True,
++                )
++            continue
++        is_prefill = context["is_prefill"]
++        start, end = 0, int(output.shape[1])
++        span = steer_span(phase, positions, is_prefill, True, start, end)
++        if span is None:
++            continue
++        direction, average = _steering_data(worker, config, mx)
++        row = result[batch_idx : batch_idx + 1]
++        lo, hi = span
++        selected = row[:, lo:hi, :]
++        method = config.get("method", "adjust_rs")
++        if method == "add_vector":
++            coefficient = float(config.get("coefficient", 0))
++            steered = selected + coefficient * direction
++        elif method == "adjust_rs":
++            if average is None:
++                raise ValueError(
++                    "Metal steering method 'adjust_rs' requires avg_proj in the vector file"
++                )
++            coefficient = average - mx.sum(selected * direction, axis=-1, keepdims=True)
++            steered = selected + coefficient * direction
++        else:
++            raise ValueError(f"Unknown steering method: {method}")
++        steered_row = mx.concatenate(
++            (row[:, :lo, :], steered, row[:, hi:, :]), axis=1
++        )
++        result = mx.concatenate(
++            (result[:batch_idx], steered_row, result[batch_idx + 1 :]), axis=0
++        )
++    return result
++
++
++def _wrap_steering_layer(inner: Any, worker: Any, layer_num: int, mx, nn):
++    class Wrapper(nn.Module):
++        def __init__(self):
++            super().__init__()
++            object.__setattr__(self, "_inner", inner)
++            object.__setattr__(self, "_worker", worker)
++            object.__setattr__(self, "_layer_num", layer_num)
++            object.__setattr__(self, "_mx", mx)
++            object.__setattr__(self, "_mia_metal_steer_wrapper", True)
++
++        def __call__(self, x, mask=None, cache=None, **kwargs):
++            result = self._inner(x, mask=mask, cache=cache, **kwargs)
++            return _apply_steering(
++                self._worker, self._layer_num, result, cache, self._mx
++            )
++
++    return Wrapper()
++
++
++def _sampling_context(
++    worker: Any, req_id: str, params: Any, is_prefill: bool
++) -> dict:
++    from mia.workers.steer_worker import _resolve_steer_config
++
++    extra = _request_extra(params)
++    return {
++        "request_id": str(req_id),
++        "steer": _resolve_steer_config(
++            extra.get("steer"), getattr(worker, "_env_config_path", None)
++        ),
++        "is_prefill": bool(is_prefill),
++    }
++
++
++def _wrap_runner_steering(worker: Any, runner: Any) -> None:
++    if getattr(runner, "_mia_metal_steering_wrapped", False):
++        return
++    original_prefill = runner._prefill_single
++
++    def prefill(req_id, token_ids, sampling_params, *args, **kwargs):
++        context = _sampling_context(worker, req_id, sampling_params, True)
++        with _active_request(worker, {"kind": "steer", "contexts": [context]}):
++            return original_prefill(req_id, token_ids, sampling_params, *args, **kwargs)
++
++    runner._prefill_single = prefill
++
++    original_batch = runner._batched_decode
++
++    def batched(decode_reqs, *args, **kwargs):
++        contexts = [
++            _sampling_context(worker, req_id, state.sampling_params, False)
++            for req_id, state in decode_reqs
++        ]
++        with _active_request(worker, {"kind": "steer", "contexts": contexts}):
++            return original_batch(decode_reqs, *args, **kwargs)
++
++    runner._batched_decode = batched
++
++    original_sequential = runner._sequential_decode
++
++    def sequential(decode_reqs, *args, **kwargs):
++        cache_context = {}
++        for req_id, state in decode_reqs:
++            context = _sampling_context(worker, req_id, state.sampling_params, False)
++            for layer_cache in state.cache:
++                cache_context[id(layer_cache)] = context
++        previous = getattr(worker, "_mia_metal_cache_context", {})
++        worker._mia_metal_cache_context = cache_context
++        try:
++            return original_sequential(decode_reqs, *args, **kwargs)
++        finally:
++            worker._mia_metal_cache_context = previous
++
++    runner._sequential_decode = sequential
++    runner._mia_metal_steering_wrapped = True
++
++
++def install_metal_steering(worker: Any) -> None:
++    """Install activation steering on vLLM-Metal's MLX transformer layers."""
++    import mlx.core as mx
++    import mlx.nn as nn
++
++    runner = worker.model_runner
++    if getattr(runner, "_paged_attention_runtime", None) is not None:
++        raise RuntimeError(
++            "MIA's vLLM-Metal steering adapter requires the non-paged MLX path "
++            "(VLLM_METAL_USE_PAGED_ATTENTION=0)"
++        )
++    model = getattr(runner, "model", None)
++    if model is None:
++        raise RuntimeError("Cannot install Metal steering before the model is loaded")
++    worker._mia_metal_steer_vectors = {}
++    worker._env_config_path = os.environ.get("MIA_STEER_CONFIG")
++    layers = _model_layers(model)
++    for layer_num, layer in enumerate(layers):
++        if not getattr(layer, "_mia_metal_steer_wrapper", False):
++            wrapper = _wrap_steering_layer(layer, worker, layer_num, mx, nn)
++            layers[layer_num] = wrapper
++    _wrap_runner_steering(worker, runner)
++    worker._mia_metal_steer = True
+diff --git a/mia/workers/qk_capture_worker.py b/mia/workers/qk_capture_worker.py
+index 50072ca..abaa05d 100644
+--- a/mia/workers/qk_capture_worker.py
++++ b/mia/workers/qk_capture_worker.py
+@@ -319,6 +319,16 @@ class QKCaptureWorker:
+         """Install forward hooks on all target attention modules."""
+         if self._hooks_installed:
+             return
++        # vLLM-Metal executes MLX modules rather than torch modules. Keep its
++        # callable-module patching isolated from the existing CPU/CUDA hooks.
++        from mia.backends.vllm_metal import (
++            install_metal_qk_capture,
++            is_metal_runner,
++        )
++        if is_metal_runner(self.model_runner):
++            install_metal_qk_capture(self)
++            self._hooks_installed = True
++            return
+         self._hooks_installed = True
+         runner = self.model_runner
+         require_v2_runner(runner)
+@@ -1045,4 +1055,3 @@ class QKCaptureWorker:
+         # lazy: keep mia.core.delivery out of import mia
+         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
+         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
+-
+diff --git a/mia/workers/steer_worker.py b/mia/workers/steer_worker.py
+index c933150..cb5ec58 100644
+--- a/mia/workers/steer_worker.py
++++ b/mia/workers/steer_worker.py
+@@ -155,6 +155,16 @@ class SteerWorker:
+         """Install steering hooks on every transformer layer."""
+         if self._hooks_installed:
+             return
++        # vLLM-Metal uses MLX callable modules; do not route them through
++        # torch's forward-hook path below.
++        from mia.backends.vllm_metal import (
++            install_metal_steering,
++            is_metal_runner,
++        )
++        if is_metal_runner(self.model_runner):
++            install_metal_steering(self)
++            self._hooks_installed = True
++            return
+         self._hooks_installed = True
+         runner = self.model_runner
+         require_v2_runner(runner)
+@@ -302,4 +312,3 @@ class SteerWorker:
+         # lazy: keep mia.core.hooks (reads env at import) out of import mia
+         from mia.core.hooks.install_steer import install_steer_hosts
+         install_steer_hosts(self)
+-
+diff --git a/pyproject.toml b/pyproject.toml
+index 028c317..84e848a 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -34,6 +34,15 @@ cuda = [
+     "zstandard==0.25.0",
+ ]
+ 
++# Apple Silicon vLLM-Metal profile. Kept separate from the existing CPU/CUDA
++# profiles; the Metal plugin executes MLX models through vLLM's engine.
++metal = [
++    "vllm==0.29.0",
++    "vllm-metal==0.2.0",
++    "mlx",
++    "mlx-lm==0.31.3",
++]
++
+ [dependency-groups]
+ test = ["pytest"]
+ # Same-machine numerical comparison runner shares the existing test tools.
+@@ -57,10 +66,11 @@ cpu-build = [
+ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854f26c9dac8"
+ 
+ [tool.uv]
+-# Triton CPU and CUDA Triton are alternative builds of the SAME distribution.
+-# These profiles are deliberately separate, even on a CUDA-capable CPU host.
++# CPU, CUDA, and Metal are separate backend profiles.
+ conflicts = [
+     [{ extra = "cpu" }, { extra = "cuda" }],
++    [{ extra = "cpu" }, { extra = "metal" }],
++    [{ extra = "cuda" }, { extra = "metal" }],
+ ]
+ 
+ [tool.uv.sources]
+diff --git a/tests/backends/test_vllm_metal.py b/tests/backends/test_vllm_metal.py
+new file mode 100644
+index 0000000..0bf2b37
+--- /dev/null
++++ b/tests/backends/test_vllm_metal.py
+@@ -0,0 +1,264 @@
++from types import SimpleNamespace
++
++import numpy as np
++import torch
++
++from mia.analyzers.attention_tracker_analyzer import AttntrackerAnalyzer
++from mia.backends.vllm_metal import (
++    _apply_steering,
++    _qk_capture,
++    _to_cpu_tensor,
++    record_qk_rows,
++)
++
++
++class _FakeMetalArray:
++    def __init__(self, value):
++        self.value = np.asarray(value)
++
++    def astype(self, _dtype):
++        return self.value.astype(np.float32)
++
++
++class _FakeMX:
++    float32 = np.float32
++
++    @staticmethod
++    def eval(_value):
++        return None
++
++    @staticmethod
++    def sum(value, axis=None, keepdims=False):
++        return np.sum(value, axis=axis, keepdims=keepdims)
++
++    @staticmethod
++    def concatenate(values, axis=0):
++        return np.concatenate(values, axis=axis)
++
++
++class _FakeAttention:
++    @staticmethod
++    def q_proj(value):
++        return value
++
++    @staticmethod
++    def k_proj(value):
++        return value
++
++    @staticmethod
++    def rope(value, offset=0):
++        return value + offset
++
++
++def test_metal_array_conversion_uses_float32_before_numpy():
++    converted = _to_cpu_tensor(_FakeMetalArray([[1, 2]]), _FakeMX)
++
++    assert converted.dtype == torch.float16
++    assert converted.device.type == "cpu"
++    assert converted.tolist() == [[1.0, 2.0]]
++
++
++def test_metal_qk_capture_uses_prefill_rope_offset_and_updated_cache():
++    worker = SimpleNamespace(
++        _conf={
++            "num_attention_heads": 2,
++            "num_key_value_heads": 2,
++            "head_dim": 2,
++        },
++        _captured_states={},
++        _disk_states={},
++        _mia_metal_active={
++            "kind": "qk",
++            "contexts": [
++                {
++                    "request_id": "request-1",
++                    "layers": {0},
++                    "mode": "last_token",
++                    "hooks_on": "prefill",
++                    "phase": "prefill",
++                    "cache_offset": 0,
++                    "seq_len": 2,
++                    "extra": {},
++                }
++            ],
++        },
++    )
++    x = np.arange(8, dtype=np.float32).reshape(1, 2, 4)
++    k = x.reshape(1, 2, 2, 2).transpose(0, 2, 1, 3)
++    cache = SimpleNamespace(keys=k, offset=2)
++
++    _qk_capture(worker, 0, _FakeAttention(), x, cache, 0, _FakeMX)
++
++    entry = worker._captured_states["request-1"]["model.layers.0.self_attn.attn"]
++    assert torch.equal(entry["q"][0], torch.from_numpy(x[0, -1]).half())
++    assert torch.equal(
++        entry["k_all"][0], torch.from_numpy(x[0].astype(np.float16))
++    )
++
++
++def test_metal_qk_capture_uses_existing_probe_contract():
++    worker = SimpleNamespace(_captured_states={}, _disk_states={})
++    q_rows = torch.tensor([[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 1.0, 0.0]])
++    k_rows = torch.tensor([[1.0, 0.0, 0.0, 1.0],
++                           [0.0, 1.0, 1.0, 0.0],
++                           [1.0, 1.0, 0.0, 0.0]])
++
++    record_qk_rows(worker, "request-1", 0, "model.layers.0.self_attn.attn",
++                   q_rows, k_rows, "last_token", {})
++
++    entry = worker._captured_states["request-1"]["model.layers.0.self_attn.attn"]
++    assert len(entry["q"]) == 1
++    assert torch.equal(entry["q"][0], q_rows[-1])
++    assert len(entry["k_all"]) == 1
++    assert torch.equal(entry["k_all"][0], k_rows)
++    assert entry["layer_num"] == 0
++    assert entry["hookq_mode"] == "last_token"
++
++    analyzer = AttntrackerAnalyzer("/tmp", {0: [1]})
++    result = analyzer.analyze(
++        analyzer_spec={
++            "input_range": [((0, 1), (1, 3))],
++            "attn_func": "sum_normalize",
++        },
++        probes={
++            "config": {
++                "num_attention_heads": 2,
++                "num_key_value_heads": 2,
++                "head_dim": 2,
++                "attention_multiplier": 0.5,
++            },
++            "qk_cache": worker._captured_states["request-1"],
++        },
++    )
++    assert list(result) == ["score"]
++    assert len(result["score"]) == 1
++    assert 0.0 <= result["score"][0] <= 1.0
++
++
++def test_metal_all_token_capture_analyzes_last_query_row():
++    worker = SimpleNamespace(_captured_states={}, _disk_states={})
++    q_rows = torch.tensor([[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 1.0, 0.0]])
++    k_rows = torch.tensor([[1.0, 0.0, 0.0, 1.0],
++                           [0.0, 1.0, 1.0, 0.0]])
++    record_qk_rows(worker, "request-1", 0, "layer", q_rows, k_rows, "all_tokens", {})
++    analyzer = AttntrackerAnalyzer("/tmp", {0: [1]})
++
++    result = analyzer.analyze(
++        analyzer_spec={
++            "input_range": [((0, 1), (1, 2))],
++            "attn_func": "sum_normalize",
++        },
++        probes={
++            "config": {
++                "num_attention_heads": 2,
++                "num_key_value_heads": 2,
++                "head_dim": 2,
++                "attention_multiplier": 0.5,
++            },
++            "qk_cache": worker._captured_states["request-1"],
++        },
++    )
++
++    assert len(result["score"]) == 1
++    assert 0.0 <= result["score"][0] <= 1.0
++
++
++def test_metal_qk_capture_keeps_disk_and_rpc_lifecycles_separate():
++    worker = SimpleNamespace(_captured_states={}, _disk_states={})
++    q_rows = torch.ones((2, 4))
++    k_rows = torch.ones((2, 4))
++
++    record_qk_rows(worker, "rpc", 0, "layer", q_rows, k_rows, "last_token", {})
++    record_qk_rows(
++        worker, "disk", 0, "layer", q_rows, k_rows, "last_token",
++        {"save_to_disk": True},
++    )
++
++    assert "rpc" in worker._captured_states
++    assert "disk" not in worker._captured_states
++    assert "disk" in worker._disk_states
++    assert "rpc" not in worker._disk_states
++
++
++def test_metal_steering_respects_layer_and_position_selection():
++    worker = SimpleNamespace(
++        _mia_metal_active={
++            "kind": "steer",
++            "contexts": [
++                {
++                    "steer": {
++                        "vector_path": "vector",
++                        "method": "add_vector",
++                        "coefficient": 2,
++                        "optimal_layer": 0,
++                        "phase": "prefill",
++                        "positions": "last_token",
++                    },
++                    "is_prefill": True,
++                }
++            ],
++        },
++        _mia_metal_steer_vectors={
++            "vector": (np.array([1.0, 0.0]), None),
++        },
++    )
++    hidden = np.zeros((1, 2, 2), dtype=np.float32)
++
++    steered = _apply_steering(worker, 0, hidden, None, _FakeMX)
++    untouched = _apply_steering(worker, 1, hidden, None, _FakeMX)
++
++    np.testing.assert_array_equal(steered, [[[0.0, 0.0], [2.0, 0.0]]])
++    np.testing.assert_array_equal(untouched, hidden)
++
++
++def test_metal_adjust_rs_steering_matches_existing_projection_rule():
++    worker = SimpleNamespace(
++        _mia_metal_active={
++            "kind": "steer",
++            "contexts": [
++                {
++                    "steer": {
++                        "vector_path": "vector",
++                        "method": "adjust_rs",
++                        "optimal_layer": 0,
++                        "phase": "both",
++                        "positions": "all_tokens",
++                    },
++                    "is_prefill": False,
++                }
++            ],
++        },
++        _mia_metal_steer_vectors={
++            "vector": (np.array([1.0, 0.0]), np.array(0.5)),
++        },
++    )
++    hidden = np.array([[[1.0, 2.0]]], dtype=np.float32)
++
++    steered = _apply_steering(worker, 0, hidden, None, _FakeMX)
++
++    np.testing.assert_array_equal(steered, [[[0.5, 2.0]]])
++
++
++def test_metal_invalid_steering_modes_warn_and_leave_output_unchanged(capsys):
++    worker = SimpleNamespace(
++        _mia_metal_active={
++            "kind": "steer",
++            "contexts": [
++                {
++                    "steer": {
++                        "optimal_layer": 0,
++                        "phase": "invalid",
++                    },
++                    "is_prefill": True,
++                }
++            ],
++        },
++        _mia_metal_steer_vectors={},
++    )
++    hidden = np.ones((1, 1, 2), dtype=np.float32)
++
++    steered = _apply_steering(worker, 0, hidden, None, _FakeMX)
++
++    np.testing.assert_array_equal(steered, hidden)
++    assert worker._bad_cfg_warned == 1
++    assert "ignoring request with invalid steer config" in capsys.readouterr().out
