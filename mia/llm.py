@@ -121,6 +121,16 @@ class MiaLLM:
         worker = analyzer_entry = None
         if worker_name or analyzer_name:
             vllm.plugins.load_general_plugins()
+            if "metal" in {
+                item.strip().lower()
+                for item in os.environ.get("VLLM_PLUGINS", "").split(",")
+                if item.strip()
+            }:
+                register_plugins()
+                if worker_name == "capture_qk":
+                    from mia.core._plugin import register
+
+                    register()
         if worker_name:
             worker_entry = PluginRegistry.get_worker(worker_name)
             if worker_entry is None:
@@ -409,4 +419,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-

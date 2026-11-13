@@ -133,6 +133,7 @@ _original_process_inputs: Callable | None = None
 _original_llm_generate: Callable | None = None
 _original_completion_response: Callable | None = None
 _original_chat_full_generator: Callable | None = None
+_MIA_PLUGIN_REGISTERED = False
 
 _ADDED_IDS: contextvars.ContextVar = contextvars.ContextVar("mia_added_ids", default=None)
 
@@ -1207,6 +1208,21 @@ def _patched_create_engine_config(self, *args, **kwargs):
         self.worker_extension_cls = _WORKER_EXT_BY_KIND[worker_type]
     _wkind = _worker_kind(self.worker_extension_cls)
 
+    if _wkind == "qk" and _vllm_metal_selected():
+        from mia.core.hooks.install import set_graph_mode
+
+        set_graph_mode(False)
+        _apply_engine_delivery(_wkind, graph=False)
+        self.worker_extension_cls = None
+        assert _original_create_engine_config is not None
+        config = _original_create_engine_config(self, *args, **kwargs)
+        config.parallel_config.worker_cls = "mia.backends.vllm_metal.worker.MiaMetalWorker"
+        additional_config = getattr(config, "additional_config", None)
+        if not isinstance(additional_config, dict):
+            additional_config = {}
+        config.additional_config = {**additional_config, "mia_worker": "qk"}
+        return config
+
     if os.environ.get("VLLM_USE_V2_MODEL_RUNNER") == "0":
         raise RuntimeError(
             "MIA requires vLLM's V2 model runner, but VLLM_USE_V2_MODEL_RUNNER=0 is set. "
@@ -1306,6 +1322,22 @@ def _patched_create_engine_config(self, *args, **kwargs):
 
 
     return config
+
+
+def _vllm_metal_selected() -> bool:
+    """Detect the declared out-of-tree Metal platform without importing its runtime."""
+    try:
+        from vllm.platforms import current_platform
+
+        if type(current_platform).__module__ == "vllm_metal.platform":
+            return True
+    except (ImportError, AttributeError):
+        pass
+    return "metal" in {
+        item.strip().lower()
+        for item in os.environ.get("VLLM_PLUGINS", "").split(",")
+        if item.strip()
+    }
 
 
 def _prompt_token_len(prompt):
@@ -1686,6 +1718,8 @@ def _engine_worker_kind(engine) -> str:
     """Worker kind ``engine`` was built with: cache stamp, else MIA class, else ``_worker_kind``."""
     vc = getattr(engine, "vllm_config", None)
     ac = getattr(vc, "additional_config", None)
+    if isinstance(ac, dict) and ac.get("mia_worker") in _WORKER_KIND_TO_SUBSYSTEM:
+        return ac["mia_worker"]
     stamp = ac.get(_COMPILE_CACHE_STAMP_KEY) if isinstance(ac, dict) else None
     if isinstance(stamp, dict) and stamp.get("worker") in _WORKER_EXT_BY_KIND:
         return stamp["worker"]
@@ -2655,6 +2689,9 @@ async def _patched_chat_full_generator(self, request, result_generator, *args, *
 
 def register() -> None:
     """Entry point called by vLLM's plugin system at engine startup."""
+    global _MIA_PLUGIN_REGISTERED
+    if _MIA_PLUGIN_REGISTERED:
+        return
     global _original_create_engine_config
     global _original_generate, _original_add_request, _original_llm_generate
     global _original_process_inputs
@@ -2726,3 +2763,4 @@ def register() -> None:
         except Exception:
             pass
 
+    _MIA_PLUGIN_REGISTERED = True
