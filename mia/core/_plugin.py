@@ -1094,6 +1094,15 @@ def _is_o0(engine_args) -> bool:
 def resolve_capture_mode(engine_args, env, hints=None, *, kind: str) -> CaptureMode:
     """Graph or eager for this engine, and who chose."""
     hints = hints or {}
+    plugins = {name.strip() for name in env.get("VLLM_PLUGINS", "").split(",")}
+    if "metal" in plugins:
+        return CaptureMode(
+            False,
+            False,
+            "metal",
+            "vLLM-Metal executes model forwards through MLX",
+            prefix_caching_off=(kind == "qk"),
+        )
     explicit = capture_mode_from_env(env)
     eager_arg = bool(getattr(engine_args, "enforce_eager", False))
     o0 = _is_o0(engine_args)
@@ -1242,7 +1251,7 @@ def _patched_create_engine_config(self, *args, **kwargs):
             self.compilation_config = _with_default_cudagraph(cc, default)
         if mode.prefix_caching_off:
             self.enable_prefix_caching = False
-    else:
+    elif mode.source != "metal":
         _disable_dynamo_for_eager_hooks()
     dp_size = int(getattr(self, "data_parallel_size", 1) or 1)
     if dp_size > 1:
@@ -2725,4 +2734,3 @@ def register() -> None:
             break
         except Exception:
             pass
-
