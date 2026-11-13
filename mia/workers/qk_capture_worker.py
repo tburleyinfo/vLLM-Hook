@@ -321,6 +321,11 @@ class QKCaptureWorker:
             return
         self._hooks_installed = True
         runner = self.model_runner
+        if type(runner).__module__.startswith("vllm_metal."):
+            from mia.backends.metal_qk import MetalQKCapture
+
+            self._metal_qk_capture = MetalQKCapture(runner, self)
+            return
         require_v2_runner(runner)
         stash = install_request_arg_stash(runner)
         self._step = None
@@ -733,6 +738,9 @@ class QKCaptureWorker:
 
     def get_captured_states(self, external_req_id: str) -> bytes | None:
         """Retrieve and remove captured QK states for a completed request."""
+        metal_capture = getattr(self, "_metal_qk_capture", None)
+        if metal_capture is not None:
+            return metal_capture.get_captured_states(external_req_id)
         # lazy: keep mia.core.hooks out of import mia
         from mia.core.hooks.drain import drain_barrier
         drain_barrier(self)
@@ -882,6 +890,10 @@ class QKCaptureWorker:
 
     def clear_captured_states(self, external_req_id: str) -> None:
         """Remove captured states without returning them (cleanup on abort/disconnect)."""
+        metal_capture = getattr(self, "_metal_qk_capture", None)
+        if metal_capture is not None:
+            metal_capture.clear_captured_states(external_req_id)
+            return
         consumer = getattr(self, "_capture_consumer", None)
         refused = getattr(self, "_qk_refused", None)
         if refused:
@@ -1045,4 +1057,3 @@ class QKCaptureWorker:
         # lazy: keep mia.core.delivery out of import mia
         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
-
