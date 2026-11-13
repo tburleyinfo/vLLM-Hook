@@ -319,8 +319,15 @@ class QKCaptureWorker:
         """Install forward hooks on all target attention modules."""
         if self._hooks_installed:
             return
-        self._hooks_installed = True
         runner = self.model_runner
+        if type(runner).__module__.startswith("vllm_metal."):
+            from mia.backends.metal.qk_capture import install_metal_qk_capture
+
+            install_metal_qk_capture(self)
+            self._hooks_installed = True
+            return
+
+        self._hooks_installed = True
         require_v2_runner(runner)
         stash = install_request_arg_stash(runner)
         self._step = None
@@ -1045,4 +1052,3 @@ class QKCaptureWorker:
         # lazy: keep mia.core.delivery out of import mia
         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
-
