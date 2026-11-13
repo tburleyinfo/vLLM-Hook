@@ -133,6 +133,7 @@ _original_process_inputs: Callable | None = None
 _original_llm_generate: Callable | None = None
 _original_completion_response: Callable | None = None
 _original_chat_full_generator: Callable | None = None
+_REGISTERED = False
 
 _ADDED_IDS: contextvars.ContextVar = contextvars.ContextVar("mia_added_ids", default=None)
 
@@ -2655,12 +2656,23 @@ async def _patched_chat_full_generator(self, request, result_generator, *args, *
 
 def register() -> None:
     """Entry point called by vLLM's plugin system at engine startup."""
+    global _REGISTERED
     global _original_create_engine_config
     global _original_generate, _original_add_request, _original_llm_generate
     global _original_process_inputs
     global _original_completion_response, _original_chat_full_generator
 
+    if _REGISTERED:
+        return
+
     _apply_delivery_selector()
+
+    from mia.backends.metal.qk_capture import (
+        install_worker_api as install_metal_worker_api,
+        metal_plugin_selected,
+    )
+    if metal_plugin_selected():
+        install_metal_worker_api()
 
     # lazy: AsyncLLM, InputProcessor and graph install code load only when register() runs
     from vllm.v1.engine.async_llm import AsyncLLM
@@ -2726,3 +2738,4 @@ def register() -> None:
         except Exception:
             pass
 
+    _REGISTERED = True
