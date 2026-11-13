@@ -1,0 +1,42 @@
+{
+  "condition": "no-graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "full-fresh-20261113-08",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Qwen2-1.5B-Instruct.json)",
+  "patch_sha256": "20aad15d9266e71dde5b5e791d847d66fbab083d7bab85d1bf09419be988b077",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 343.03,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "behavior-and-target.md": "fd994a59d24fd2c1fd549569ef035143a486176ab82beb1785929d9f2a2b19be",
+      "completion.json": "7d3737310aef1157e907101bca0983472d2322d9f8bdeae95566d2823dea5fa9"
+    },
+    "patch_sha256": "20aad15d9266e71dde5b5e791d847d66fbab083d7bab85d1bf09419be988b077",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Run the focused tests and validate capture, probe delivery, analyzer scores, disk artifacts, and the usage example on Apple Silicon with vLLM-Metal 0.2.0 and mlx-lm 0.31.3."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Qwen2-1.5B-Instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}

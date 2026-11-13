@@ -1202,6 +1202,14 @@ def _capture_mode_line(mode: CaptureMode, engine_args, cg_explicit: bool = False
 
 
 def _patched_create_engine_config(self, *args, **kwargs):
+    if (
+        "metal" in {item.strip() for item in os.environ.get("VLLM_PLUGINS", "").split(",")}
+        and not getattr(self, "worker_extension_cls", None)
+        and not os.environ.get("MIA_WORKER")
+    ):
+        assert _original_create_engine_config is not None
+        return _original_create_engine_config(self, *args, **kwargs)
+
     if not self.worker_extension_cls:
         worker_type = parse_mia_worker_env(os.environ.get("MIA_WORKER")) or DEFAULT_MIA_WORKER
         self.worker_extension_cls = _WORKER_EXT_BY_KIND[worker_type]
@@ -2725,4 +2733,3 @@ def register() -> None:
             break
         except Exception:
             pass
-
