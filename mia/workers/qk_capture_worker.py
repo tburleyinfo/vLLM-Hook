@@ -321,6 +321,11 @@ class QKCaptureWorker:
             return
         self._hooks_installed = True
         runner = self.model_runner
+        if (type(runner).__module__.startswith("vllm_metal.")
+                or type(runner).__name__ == "MetalModelRunner"):
+            from mia.backends.metal.qk_capture import install_qk_capture
+            install_qk_capture(self)
+            return
         require_v2_runner(runner)
         stash = install_request_arg_stash(runner)
         self._step = None
@@ -1045,4 +1050,3 @@ class QKCaptureWorker:
         # lazy: keep mia.core.delivery out of import mia
         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
-

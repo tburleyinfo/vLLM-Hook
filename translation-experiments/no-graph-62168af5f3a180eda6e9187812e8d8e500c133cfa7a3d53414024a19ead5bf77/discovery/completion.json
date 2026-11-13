@@ -1,0 +1,9 @@
+{
+  "status": "incomplete",
+  "remaining_work": [
+    "Implement vLLM-Metal activation steering and hidden-state capture through existing public APIs.",
+    "Implement paged-attention capture and broader MLX model coverage.",
+    "Run tests and end-to-end Attention Tracker on Apple Silicon; verify capture delivery, lifecycle behavior, analysis output, and numerical behavior.",
+    "Declare compatible vLLM-Metal and MLX dependency versions from target release metadata."
+  ]
+}

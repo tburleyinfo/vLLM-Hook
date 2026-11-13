@@ -1,0 +1,26 @@
+{
+  "condition": "no-graph",
+  "patch_sha256": "62168af5f3a180eda6e9187812e8d8e500c133cfa7a3d53414024a19ead5bf77",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "validation": "skipped",
+  "pilot": true,
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Implement vLLM-Metal activation steering and hidden-state capture through existing public APIs.",
+      "Implement paged-attention capture and broader MLX model coverage.",
+      "Run tests and end-to-end Attention Tracker on Apple Silicon; verify capture delivery, lifecycle behavior, analysis output, and numerical behavior.",
+      "Declare compatible vLLM-Metal and MLX dependency versions from target release metadata."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/Mistral-7B-Instruct-v0.3.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "experiment_id": "full-fresh-20261113-02",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/Mistral-7B-Instruct-v0.3.json)",
+  "runtime_validation_required": false,
+  "validator_sha256": "a96dd7b92f17f75f2d491f8d17d5057d68f43e2ece76c3275a12b78efdaf527c"
+}

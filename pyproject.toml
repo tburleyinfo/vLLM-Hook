@@ -34,6 +34,14 @@ cuda = [
     "zstandard==0.25.0",
 ]
 
+# Apple Silicon vLLM-Metal. The target source tree does not declare release
+# pins; keep these alongside, and independent from, the existing CPU/CUDA profiles.
+metal = [
+    "mlx",
+    "mlx-lm",
+    "vllm-metal",
+]
+
 [dependency-groups]
 test = ["pytest"]
 # Same-machine numerical comparison runner shares the existing test tools.
