@@ -34,6 +34,15 @@ cuda = [
     "zstandard==0.25.0",
 ]
 
+# vLLM-Metal supplies real vLLM scheduling/generation backed by MLX on Apple
+# Silicon. Keep the existing CPU/CUDA profiles and their pins unchanged.
+metal = [
+    "mlx",
+    "mlx-lm",
+    "mlx-vlm",
+    "vllm-metal",
+]
+
 [dependency-groups]
 test = ["pytest"]
 # Same-machine numerical comparison runner shares the existing test tools.
@@ -61,6 +70,8 @@ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854
 # These profiles are deliberately separate, even on a CUDA-capable CPU host.
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
+    [{ extra = "cpu" }, { extra = "metal" }],
+    [{ extra = "cuda" }, { extra = "metal" }],
 ]
 
 [tool.uv.sources]
