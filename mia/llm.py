@@ -15,6 +15,8 @@ from mia.artifacts import dispatch_disk_analyze
 from mia._profiler import PROF
 from mia.workers.steer_worker import resolve_steer_modes
 from mia.core.delivery.artifact_quant import dequantize_cache_inplace
+from mia.workers._common import save_pt_atomic
+from mia.errors import MiaDeliveryError
 
 
 def _merge_probes(all_probes: list) -> dict:
@@ -356,6 +358,26 @@ class MiaLLM:
             else:
                 outputs = self.llm.generate(prompts, sp_list, **passthrough)
 
+        metal_selected = "metal" in {
+            plugin.strip()
+            for plugin in os.environ.get("VLLM_PLUGINS", "").split(",")
+            if plugin.strip()
+        }
+        if (metal_selected and hook and self.worker_name == "capture_qk"
+                and save_to_disk and outputs):
+            probe_parts = [getattr(output, "probes", None) for output in outputs]
+            if any(part is None for part in probe_parts):
+                raise MiaDeliveryError(
+                    "vLLM-Metal Q/K disk delivery requires a capture for every output"
+                )
+            merged = _dequantized(_merge_probes(probe_parts))
+            run_dir = os.path.join(self._hook_dir, str(run_id))
+            os.makedirs(run_dir, exist_ok=True)
+            save_pt_atomic(merged, os.path.join(run_dir, "qk.pt"))
+            for output in outputs:
+                if hasattr(output, "probes"):
+                    del output.probes
+
         if hook and self.worker_name and not save_to_disk:
             # lazy: keep mia.core.delivery out of import mia
             from mia.core.delivery.delivered_probes import attach_lazy, merge_source, pending
@@ -409,4 +431,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-
