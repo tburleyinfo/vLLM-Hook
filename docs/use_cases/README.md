@@ -6,7 +6,7 @@ Each row maps a use case to its paper, its demo under `examples/`, the plugin na
 
 | Use case | Paper | Demo | `analyzer_name` | `worker_name` | Contributor |
 | --- | --- | --- | --- | --- | --- |
-| Attention Tracker | [Attention Tracker: Detecting Prompt Injection Attacks in LLMs](https://arxiv.org/abs/2411.00348) | `demo_attntracker.py` | `attn_tracker` | `capture_qk` | [@IRENEKO](https://github.com/IRENEKO); vLLM-Hook v0 Colab notebook: [@tburleyinfo](https://github.com/tburleyinfo) |
+| [Attention Tracker](attntracker_metal.md) | [Attention Tracker: Detecting Prompt Injection Attacks in LLMs](https://arxiv.org/abs/2411.00348) | `demo_attntracker.py` | `attn_tracker` | `capture_qk` | [@IRENEKO](https://github.com/IRENEKO); vLLM-Hook v0 Colab notebook: [@tburleyinfo](https://github.com/tburleyinfo) |
 | Core Reranker | [Contrastive Retrieval Heads Improve Attention-Based Re-Ranking](https://arxiv.org/abs/2510.02219) | `demo_corer.py` | `core_reranker` | `capture_qk` † | [@IRENEKO](https://github.com/IRENEKO); vLLM-Hook v0 Colab notebook: [@tburleyinfo](https://github.com/tburleyinfo) |
 | Activation Steering | [Improving Instruction-Following in Language Models through Activation Steering](https://arxiv.org/abs/2410.12877) | `demo_actsteer.py`, `demo_actsteer_serve.py`, `demo_actsteer_language.py` (language steering: [@lingyue404](https://github.com/lingyue404)) | — | `steer` | [@IRENEKO](https://github.com/IRENEKO); vLLM-Hook v0 Colab notebook: [@tburleyinfo](https://github.com/tburleyinfo) |
 | Hidden-State Probe | — | `demo_hiddenstate.py` | `hidden_states` | `capture_hs` | [@IRENEKO](https://github.com/IRENEKO) |
