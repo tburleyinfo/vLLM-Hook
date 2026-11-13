@@ -1,0 +1,9 @@
+{
+  "status": "incomplete",
+  "remaining_work": [
+    "Install the MLX Q/K capture primitive in the vLLM-Metal Qwen2 runner and associate captured arrays with the correct generation requests.",
+    "Wire Metal captures through MiaLLM.generate and preserve in-memory and disk probe lifecycle behavior.",
+    "Run unit and Apple-Silicon end-to-end tests for capture, analyzer output, lifecycle, and behavioral parity.",
+    "Implement and validate other requested Metal backend capabilities, including steering, before claiming repository-wide parity."
+  ]
+}
