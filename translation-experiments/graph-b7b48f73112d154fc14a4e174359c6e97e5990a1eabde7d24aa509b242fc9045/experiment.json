@@ -1,0 +1,45 @@
+{
+  "condition": "graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "full-fresh-20261113-06",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json)",
+  "patch_sha256": "b7b48f73112d154fc14a4e174359c6e97e5990a1eabde7d24aa509b242fc9045",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 247.81,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "attntracker.md": "6c02a0f8a44a1606f83eca8e3ceb1b30f20e09c27cc6d60c04b877a694c2bad2",
+      "completion.json": "337b344dd1763b30208d2e81b4f3fe89a3c13fa25a4629a1fab4bd0592ecbcb0"
+    },
+    "patch_sha256": "b7b48f73112d154fc14a4e174359c6e97e5990a1eabde7d24aa509b242fc9045",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Connect Metal Q/K capture to the existing MiaLLM and server worker lifecycle, including per-request routing, cached-prefix reconstruction, chunked prefill, artifact delivery, and cleanup.",
+      "Capture Q/K on the requested non-paged vLLM-Metal path (VLLM_METAL_USE_PAGED_ATTENTION=0).",
+      "Implement existing public activation-steering behavior on MLX residual streams.",
+      "Validate target dependency resolution and run unit/integration tests on Apple Silicon."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}

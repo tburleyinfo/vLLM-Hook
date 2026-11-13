@@ -34,6 +34,15 @@ cuda = [
     "zstandard==0.25.0",
 ]
 
+# Optional Apple Silicon runtime. Keep the existing CPU/CUDA profiles intact;
+# vLLM-Metal supplies its own vLLM platform plugin and MLX model runtime.
+metal = [
+    "vllm==0.29.0",
+    "vllm-metal",
+    "mlx",
+    "mlx-lm",
+]
+
 [dependency-groups]
 test = ["pytest"]
 # Same-machine numerical comparison runner shares the existing test tools.

@@ -1,0 +1,9 @@
+{
+  "status": "incomplete",
+  "remaining_work": [
+    "Connect Metal Q/K capture to the existing MiaLLM and server worker lifecycle, including per-request routing, cached-prefix reconstruction, chunked prefill, artifact delivery, and cleanup.",
+    "Capture Q/K on the requested non-paged vLLM-Metal path (VLLM_METAL_USE_PAGED_ATTENTION=0).",
+    "Implement existing public activation-steering behavior on MLX residual streams.",
+    "Validate target dependency resolution and run unit/integration tests on Apple Silicon."
+  ]
+}

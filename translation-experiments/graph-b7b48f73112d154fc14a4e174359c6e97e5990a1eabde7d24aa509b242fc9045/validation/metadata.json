@@ -1,0 +1,26 @@
+{
+  "condition": "graph",
+  "patch_sha256": "b7b48f73112d154fc14a4e174359c6e97e5990a1eabde7d24aa509b242fc9045",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "validation": "skipped",
+  "pilot": true,
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Connect Metal Q/K capture to the existing MiaLLM and server worker lifecycle, including per-request routing, cached-prefix reconstruction, chunked prefill, artifact delivery, and cleanup.",
+      "Capture Q/K on the requested non-paged vLLM-Metal path (VLLM_METAL_USE_PAGED_ATTENTION=0).",
+      "Implement existing public activation-steering behavior on MLX residual streams.",
+      "Validate target dependency resolution and run unit/integration tests on Apple Silicon."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "experiment_id": "full-fresh-20261113-06",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json)",
+  "runtime_validation_required": false,
+  "validator_sha256": "a96dd7b92f17f75f2d491f8d17d5057d68f43e2ece76c3275a12b78efdaf527c"
+}
