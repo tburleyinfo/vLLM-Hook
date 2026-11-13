@@ -1,0 +1,387 @@
+diff --git a/TRANSLATION.md b/TRANSLATION.md
+new file mode 100644
+index 0000000..d5ab241
+--- /dev/null
++++ b/TRANSLATION.md
+@@ -0,0 +1,56 @@
++# vLLM-Metal translation
++
++## Implemented
++
++- Added the `metal` optional dependency profile without changing the existing
++  CPU/CUDA profiles, pins, or installation recipes.
++- Added a scoped Q/K interception primitive for the paged vLLM-Metal SDPA
++  path. It observes post-RoPE MLX Q/K arrays, converts them to the PyTorch
++  tensor representation expected by the existing Q/K analyzer, and restores
++  patched target callables after normal or exceptional exit.
++- Kept generation in vLLM/vLLM-Metal; the adapter does not invoke standalone
++  `mlx_lm` generation or change forward outputs.
++- Added a Metal Attention Tracker usage note, a unit test for the existing
++  analyzer probe contract and hook restoration, and discovery notes tracing
++  the relevant source and target code.
++
++## How to run
++
++Install the optional target profile with `uv sync --extra metal --group test`.
++For vLLM-Metal, configure the plugin with `VLLM_PLUGINS=metal`; see
++`docs/metal_attntracker.md` for the target environment.
++
++The Q/K adapter currently requires vLLM-Metal paged SDPA attention enabled
++and generation in the current Python execution context. Therefore it is not
++usable under the requested `VLLM_METAL_USE_PAGED_ATTENTION=0` environment, nor
++is the notebook's existing
++`MiaLLM(worker_name="capture_qk", analyzer_name="attn_tracker")` flow yet
++connected end-to-end.
++
++## Checks performed
++
++- Inspected the selected notebook, model configuration, MIA public API,
++  Q/K worker, analyzer and hook installation path.
++- Inspected the supplied vLLM-Metal platform, worker, model lifecycle,
++  model runner, paged attention wrapper, SDPA implementation and platform
++  hook notes.
++- Added but did not execute `tests/use_cases/test_metal_attention_capture.py`.
++  This environment exposed file inspection/editing tools only; no test runner
++  or target runtime command could be invoked here.
++
++## Remaining implementation work
++
++- Integrate with vLLM-Metal's worker/runner lifecycle so the existing
++  `MiaLLM` and server APIs can arm, route, retrieve and clean up captures by
++  request ID while preserving batching, chunked prefill, cached-prefix K
++  reconstruction, cancellation, errors and artifact persistence.
++- Implement Q/K observation on the requested non-paged Metal path; current
++  adapter depends on a wrapper bypassed when `VLLM_METAL_USE_PAGED_ATTENTION=0`.
++- Implement MIA's public activation-steering behavior on MLX layer residuals
++  with the existing steering vectors, phase/position semantics and request
++  lifecycle. No Metal steering implementation is provided by this change.
++- Add and run target-runtime tests for generation, capture, analyzer parity,
++  batching, lifecycle cleanup, and steering on Apple Silicon.
++- Verify compatible vLLM-Metal package/version and dependency resolution on
++  Apple Silicon; versions could not be established from the supplied source
++  tree or runtime checks.
+diff --git a/docs/metal_attntracker.md b/docs/metal_attntracker.md
+new file mode 100644
+index 0000000..2e506b4
+--- /dev/null
++++ b/docs/metal_attntracker.md
+@@ -0,0 +1,94 @@
++# Attention Tracker on Apple Silicon
++
++The `metal` optional dependency profile installs vLLM-Metal alongside the
++existing CPU/CUDA profiles. Run generation with vLLM's normal `LLM` API and
++select the Metal platform using the vLLM-Metal plugin:
++
++```sh
++uv sync --extra metal --group test
++export VLLM_PLUGINS=metal
++export VLLM_ENABLE_V1_MULTIPROCESSING=0
++export VLLM_METAL_USE_PAGED_ATTENTION=0
++export VLLM_METAL_MEMORY_FRACTION=auto
++```
++
++`notebooks/demo_attntracker_colab.ipynb` uses `MiaLLM(worker_name="capture_qk",
++analyzer_name="attn_tracker")` with the config
++`model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json`. That exact
++public-API path is **not yet connected to vLLM-Metal**: MIA's current worker
++expects a vLLM V2 PyTorch runner, while vLLM-Metal loads an MLX model, and the
++requested `VLLM_METAL_USE_PAGED_ATTENTION=0` path does not call Metal's paged
++SDPA wrapper. Do not interpret the adapter below as completing that path.
++
++The current Q/K adapter is limited to vLLM-Metal's paged SDPA wrapper and
++requires the generation forward to run in the current Python execution
++context. To exercise that primitive, paged attention must be enabled for the
++run (`VLLM_METAL_USE_PAGED_ATTENTION=1`); this differs from the requested
++target environment above:
++
++```python
++import json
++import math
++from pathlib import Path
++
++from vllm import LLM, SamplingParams
++
++from mia.analyzers.attention_tracker_analyzer import AttntrackerAnalyzer
++from mia.backends.metal import MetalQKCapture, capture_vllm_metal_attention
++
++model = "meta-llama/Meta-Llama-3-8B-Instruct"
++config_path = Path("model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json")
++attention_tracker_config = json.loads(config_path.read_text())
++heads = attention_tracker_config["params"]["important_heads"]
++layer_to_heads = {}
++for layer, head in heads:
++    layer_to_heads.setdefault(layer, []).append(head)
++
++llm = LLM(
++    model=model,
++    max_model_len=1024,
++    max_num_batched_tokens=1024,
++    enable_prefix_caching=False,
++)
++tokenizer = llm.get_tokenizer()
++hf_config = llm.llm_engine.model_config.hf_text_config
++head_dim = int(hf_config.hidden_size) // int(hf_config.num_attention_heads)
++capture = MetalQKCapture(
++    {
++        "num_attention_heads": int(hf_config.num_attention_heads),
++        "num_key_value_heads": int(hf_config.num_key_value_heads),
++        "head_dim": head_dim,
++        "attention_multiplier": float(
++            getattr(hf_config, "attention_multiplier", 1 / math.sqrt(head_dim))
++        ),
++    },
++    hookq_mode=attention_tracker_config["hookq"]["hookq_mode"],
++)
++instruction = "Analyze and output the sentence attitude:"
++data = "The weather is nice today, with a soft breeze and sunshine."
++prompt = f"{instruction}\nData: {data}"
++token_end = lambda text: len(tokenizer.encode(text, add_special_tokens=False))
++input_range = (
++    (0, token_end(instruction)),
++    (token_end(f"{instruction}\nData: "), token_end(prompt)),
++)
++
++with capture_vllm_metal_attention(capture):
++    output = llm.generate(
++        [prompt],
++        SamplingParams(max_tokens=1, temperature=0.1),
++    )
++probes = capture.probes()
++scores = AttntrackerAnalyzer("", layer_to_heads).analyze(
++    analyzer_spec={"input_range": input_range, "attn_func": "sum_normalize"},
++    probes=probes,
++)
++print(output[0].outputs[0].text)
++print(scores["score"])
++```
++
++This exercises real vLLM generation through vLLM-Metal and does not change
++model outputs or run a second inference stack. Chat-template token range
++recipes and the two-case notebook are not yet wired to this primitive. It
++requires same-context instrumentation and paged SDPA, so it is not compatible
++with the target environment above. See `TRANSLATION.md` for the precise gaps.
+diff --git a/mia/backends/__init__.py b/mia/backends/__init__.py
+new file mode 100644
+index 0000000..8c51f75
+--- /dev/null
++++ b/mia/backends/__init__.py
+@@ -0,0 +1 @@
++"""Backend-specific implementations used by MIA."""
+diff --git a/mia/backends/metal/__init__.py b/mia/backends/metal/__init__.py
+new file mode 100644
+index 0000000..ac9eba2
+--- /dev/null
++++ b/mia/backends/metal/__init__.py
+@@ -0,0 +1,5 @@
++"""vLLM-Metal integrations."""
++
++from mia.backends.metal.attention import MetalQKCapture, capture_vllm_metal_attention
++
++__all__ = ["MetalQKCapture", "capture_vllm_metal_attention"]
+diff --git a/mia/backends/metal/attention.py b/mia/backends/metal/attention.py
+new file mode 100644
+index 0000000..277ae05
+--- /dev/null
++++ b/mia/backends/metal/attention.py
+@@ -0,0 +1,114 @@
++"""Q/K capture primitives for vLLM-Metal's MLX attention path.
++
++The adapter observes the post-RoPE Q/K arrays produced by vLLM-Metal's own
++SDPA preparation. It never runs generation or attention independently.
++"""
++
++from __future__ import annotations
++
++import contextlib
++import contextvars
++import threading
++from typing import Any, Iterator
++
++import numpy as np
++import torch
++
++
++_ACTIVE_CAPTURE: contextvars.ContextVar[MetalQKCapture | None] = contextvars.ContextVar(
++    "mia_metal_qk_capture", default=None
++)
++_ACTIVE_LAYER: contextvars.ContextVar[int | None] = contextvars.ContextVar(
++    "mia_metal_attention_layer", default=None
++)
++_PATCH_LOCK = threading.RLock()
++
++
++def _mlx_array_to_torch(value: Any) -> torch.Tensor:
++    import mlx.core as mx
++
++    mx.eval(value)
++    return torch.from_numpy(np.asarray(value.astype(mx.float32)).copy())
++
++
++class MetalQKCapture:
++    """Collect per-layer, per-prefill Q/K arrays in MIA's probe contract."""
++
++    def __init__(self, config: dict[str, Any], *, hookq_mode: str = "last_token"):
++        if hookq_mode not in ("last_token", "all_tokens"):
++            raise ValueError(f"unsupported hookq_mode {hookq_mode!r}")
++        self.config = dict(config)
++        self.hookq_mode = hookq_mode
++        self.qk_cache: dict[str, dict[str, Any]] = {}
++
++    def record(self, layer_num: int, queries: Any, keys: Any, context: Any) -> None:
++        """Record one MLX SDPA preparation result without changing its outputs."""
++        offsets = getattr(context, "cu_seqlens", None)
++        if not offsets or len(offsets) < 2:
++            raise RuntimeError("vLLM-Metal attention context has no cu_seqlens")
++
++        boundaries = [int(value) for value in offsets]
++        decode_count = int(getattr(context, "num_decode_requests", 0))
++        layer_name = f"layer.{int(layer_num)}"
++        entry = self.qk_cache.setdefault(
++            layer_name,
++            {"q": [], "k_all": [], "layer_num": int(layer_num), "hookq_mode": self.hookq_mode},
++        )
++
++        q_flat = queries[0].transpose(1, 0, 2)
++        k_flat = keys[0].transpose(1, 0, 2)
++        for request_idx in range(decode_count, len(boundaries) - 1):
++            start, end = boundaries[request_idx : request_idx + 2]
++            if end <= start:
++                continue
++            q_rows = q_flat[start:end]
++            q_selected = q_rows[-1:] if self.hookq_mode == "last_token" else q_rows
++            entry["q"].append(_mlx_array_to_torch(q_selected.reshape(q_selected.shape[0], -1)))
++            entry["k_all"].append(
++                _mlx_array_to_torch(k_flat[start:end].reshape(end - start, -1))
++            )
++
++    def probes(self) -> dict[str, Any]:
++        """Return the public analyzer input shape consumed by ``MiaLLM.analyze``."""
++        return {"config": dict(self.config), "qk_cache": self.qk_cache}
++
++
++@contextlib.contextmanager
++def capture_vllm_metal_attention(capture: MetalQKCapture) -> Iterator[MetalQKCapture]:
++    """Temporarily intercept vLLM-Metal Q/K preparation in the current process.
++
++    This context manager is a backend primitive, not an automatic MIA worker
++    integration. The target model still executes through vLLM-Metal.
++    """
++    import vllm_metal.attention.impls.sdpa as sdpa
++    import vllm_metal.attention.impls.sdpa_wrapper as sdpa_wrapper
++
++    with _PATCH_LOCK:
++        original_prepare = sdpa.prepare_sdpa_qkv
++        wrapper_class = sdpa_wrapper.SDPAPagedAttentionWrapper
++        original_call = wrapper_class.__call__
++
++        def capture_prepare(*args, **kwargs):
++            result = original_prepare(*args, **kwargs)
++            active = _ACTIVE_CAPTURE.get()
++            layer_num = _ACTIVE_LAYER.get()
++            if active is not None and layer_num is not None:
++                active.record(layer_num, result[0], result[1], args[2])
++            return result
++
++        def capture_call(self, *args, **kwargs):
++            token = _ACTIVE_LAYER.set(int(self._mk_layer_idx))
++            try:
++                return original_call(self, *args, **kwargs)
++            finally:
++                _ACTIVE_LAYER.reset(token)
++
++        sdpa.prepare_sdpa_qkv = capture_prepare
++        wrapper_class.__call__ = capture_call
++        active_token = _ACTIVE_CAPTURE.set(capture)
++        try:
++            yield capture
++        finally:
++            _ACTIVE_CAPTURE.reset(active_token)
++            wrapper_class.__call__ = original_call
++            sdpa.prepare_sdpa_qkv = original_prepare
+diff --git a/pyproject.toml b/pyproject.toml
+index 028c317..cdba92a 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -34,6 +34,15 @@ cuda = [
+     "zstandard==0.25.0",
+ ]
+ 
++# Optional Apple Silicon runtime. Keep the existing CPU/CUDA profiles intact;
++# vLLM-Metal supplies its own vLLM platform plugin and MLX model runtime.
++metal = [
++    "vllm==0.29.0",
++    "vllm-metal",
++    "mlx",
++    "mlx-lm",
++]
++
+ [dependency-groups]
+ test = ["pytest"]
+ # Same-machine numerical comparison runner shares the existing test tools.
+diff --git a/tests/use_cases/test_metal_attention_capture.py b/tests/use_cases/test_metal_attention_capture.py
+new file mode 100644
+index 0000000..eb9ec5b
+--- /dev/null
++++ b/tests/use_cases/test_metal_attention_capture.py
+@@ -0,0 +1,61 @@
++import pytest
++import torch
++
++pytest.importorskip("mlx.core")
++pytest.importorskip("vllm_metal")
++
++from mia.backends.metal.attention import MetalQKCapture, capture_vllm_metal_attention
++from mia.analyzers.attention_tracker_analyzer import AttntrackerAnalyzer
++
++
++def test_metal_qk_probe_contract_and_analyzer(tmp_path):
++    import mlx.core as mx
++
++    capture = MetalQKCapture(
++        {
++            "num_attention_heads": 2,
++            "num_key_value_heads": 1,
++            "head_dim": 2,
++            "attention_multiplier": 0.5,
++        }
++    )
++
++    class Context:
++        cu_seqlens = [0, 3]
++        num_decode_requests = 0
++
++    queries = mx.array([[[[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]],
++                         [[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]]]])
++    keys = mx.array([[[[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]]])
++
++    with capture_vllm_metal_attention(capture):
++        capture.record(0, queries, keys, Context())
++
++    probes = capture.probes()
++    analyzer = AttntrackerAnalyzer(str(tmp_path), {0: [0]})
++    result = analyzer.analyze(
++        analyzer_spec={"input_range": ((0, 1), (1, 3)), "attn_func": "sum_normalize"},
++        probes=probes,
++    )
++
++    assert probes["qk_cache"]["layer.0"]["q"][0].shape == (1, 4)
++    assert probes["qk_cache"]["layer.0"]["k_all"][0].shape == (3, 2)
++    assert 0.0 < result["score"][0] < 1.0
++
++
++def test_interceptor_restores_target_callables():
++    import vllm_metal.attention.impls.sdpa as sdpa
++    import vllm_metal.attention.impls.sdpa_wrapper as sdpa_wrapper
++
++    capture = MetalQKCapture({})
++    prepare = sdpa.prepare_sdpa_qkv
++    call = sdpa_wrapper.SDPAPagedAttentionWrapper.__call__
++
++    with pytest.raises(RuntimeError, match="sentinel"):
++        with capture_vllm_metal_attention(capture):
++            assert sdpa.prepare_sdpa_qkv is not prepare
++            assert sdpa_wrapper.SDPAPagedAttentionWrapper.__call__ is not call
++            raise RuntimeError("sentinel")
++
++    assert sdpa.prepare_sdpa_qkv is prepare
++    assert sdpa_wrapper.SDPAPagedAttentionWrapper.__call__ is call
