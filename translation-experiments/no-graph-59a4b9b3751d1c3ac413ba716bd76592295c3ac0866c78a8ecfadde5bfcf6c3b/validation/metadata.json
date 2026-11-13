@@ -1,0 +1,26 @@
+{
+  "condition": "no-graph",
+  "patch_sha256": "59a4b9b3751d1c3ac413ba716bd76592295c3ac0866c78a8ecfadde5bfcf6c3b",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "validation": "skipped",
+  "pilot": true,
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Run focused tests and live Attention Tracker generation on Apple Silicon with the selected quantized checkpoint.",
+      "Verify dependency resolution for the Metal extra on the target Apple Silicon environment.",
+      "Implement and verify activation steering, hidden-state capture and optional precomputed Q/K score capture on vLLM-Metal.",
+      "Extend and verify capture support for other MLX model families and the Metal paged-attention path."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/granite-3.1-2b-instruct-quantized.w4a16.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "experiment_id": "full-fresh-20261113-04",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/granite-3.1-2b-instruct-quantized.w4a16.json)",
+  "runtime_validation_required": false,
+  "validator_sha256": "a96dd7b92f17f75f2d491f8d17d5057d68f43e2ece76c3275a12b78efdaf527c"
+}
