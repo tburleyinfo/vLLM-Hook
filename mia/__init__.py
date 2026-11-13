@@ -16,7 +16,17 @@ from mia.analyzers.tool_call_risk_analyzer import ToolCallRiskAnalyzer
 
 def register_plugins():
     """Register MIA's workers and analyzers in ``PluginRegistry`` (vLLM plugin entry point)."""
-    PluginRegistry.register_worker("capture_qk",       QKCaptureWorker)
+    import os
+
+    plugins = {name.strip() for name in os.environ.get("VLLM_PLUGINS", "").split(",")}
+    if "metal" in plugins:
+        from mia.core.metal.attntracker import MetalQKCaptureWorker
+
+        qk_worker = MetalQKCaptureWorker
+    else:
+        qk_worker = QKCaptureWorker
+
+    PluginRegistry.register_worker("capture_qk", qk_worker)
     PluginRegistry.register_worker("steer",      SteerWorker)
     PluginRegistry.register_worker("capture_hs", HSCaptureWorker)
 

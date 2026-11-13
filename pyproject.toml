@@ -34,6 +34,15 @@ cuda = [
     "zstandard==0.25.0",
 ]
 
+# Apple Silicon vLLM-Metal uses the standard macOS PyTorch wheel and MLX.
+# Keep this profile separate from the existing CPU/CUDA profiles.
+metal = [
+    "vllm-metal==0.2.0",
+    "mlx",
+    "mlx-lm==0.31.3",
+    "torch",
+]
+
 [dependency-groups]
 test = ["pytest"]
 # Same-machine numerical comparison runner shares the existing test tools.
@@ -57,10 +66,12 @@ cpu-build = [
 vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854f26c9dac8"
 
 [tool.uv]
-# Triton CPU and CUDA Triton are alternative builds of the SAME distribution.
-# These profiles are deliberately separate, even on a CUDA-capable CPU host.
+# CPU, CUDA and Metal are alternative runtime profiles and stay separate even
+# when one host happens to satisfy more than one profile's platform markers.
 conflicts = [
     [{ extra = "cpu" }, { extra = "cuda" }],
+    [{ extra = "cpu" }, { extra = "metal" }],
+    [{ extra = "cuda" }, { extra = "metal" }],
 ]
 
 [tool.uv.sources]
