@@ -81,6 +81,8 @@ class AttntrackerAnalyzer:
             for i, (q_last, k_all) in enumerate(zip(q_list, k_list)):
                 seq_len = k_all.shape[0]
 
+                if q_last.dim() == 2:
+                    q_last = q_last[-1]
                 q_heads = q_last.view(config["num_attention_heads"], config["head_dim"])
                 q_heads = q_heads.unsqueeze(0).unsqueeze(2)
 
@@ -135,4 +137,3 @@ class AttntrackerAnalyzer:
                 scores.extend(head_scores.tolist())
             batch_scores.append(np.mean(scores))
         return batch_scores
-
