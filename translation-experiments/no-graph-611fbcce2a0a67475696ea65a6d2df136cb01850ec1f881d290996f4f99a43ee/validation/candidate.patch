@@ -1,0 +1,805 @@
+diff --git a/TRANSLATION.md b/TRANSLATION.md
+new file mode 100644
+index 0000000..f4ffb83
+--- /dev/null
++++ b/TRANSLATION.md
+@@ -0,0 +1,75 @@
++# vLLM-Metal translation
++
++## Implemented
++
++- Added the `metal` optional dependency profile without changing the existing
++  CPU/CUDA dependencies or installation paths.
++- `MiaLLM` keeps the public API and uses real `vllm.LLM.generate` calls on
++  vLLM-Metal. For `capture_qk`, a scoped Qwen2 backend observes the post-RoPE
++  query/key arrays at the MLX attention call used by vLLM-Metal. It exports
++  CPU tensors in the existing MIA probe shape; `AttntrackerAnalyzer` remains
++  the analysis implementation.
++- `save_to_disk=True` writes the existing `qk.pt` artifact contract, so the
++  existing disk-analysis route remains available.
++- The same backend applies existing `steer` configs to the Qwen2 residual
++  stream immediately before `post_attention_layernorm`. It supports the
++  existing `add_vector` and `adjust_rs` methods, layer selection, phase and
++  position options.
++- Q/K capture supports both raw-Q/K and selected-head score payloads.
++- Instrumentation is installed only around the `generate` call and restored
++  in `finally`; calls without hooks retain normal vLLM-Metal model execution.
++- Added numeric layout tests and a runnable Attention Tracker example.
++
++The bridge is specific to the MLX Qwen2 model implementation because that is
++the selected model and the model source supplied for vLLM-Metal uses
++`mlx_lm.models.qwen2.Attention`. It does not replace the target model's
++generation path with standalone MLX generation.
++
++## Run Attention Tracker
++
++Use an Apple Silicon environment with compatible vLLM, vLLM-Metal, MLX and
++MLX-LM packages installed. From the repository root, install the Metal extra
++and test group:
++
++```sh
++uv sync --extra metal --group test
++```
++
++Run the selected model with the target configuration:
++
++```sh
++VLLM_ENABLE_V1_MULTIPROCESSING=0 \
++VLLM_METAL_USE_PAGED_ATTENTION=0 \
++VLLM_METAL_MEMORY_FRACTION=auto \
++VLLM_PLUGINS=metal \
++python examples/demo_attntracker_metal.py
++```
++
++The script registers MIA's existing plugins, loads
++`model_configs/attention_tracker/Qwen2-1.5B-Instruct.json`, captures the two
++prompts' selected heads, and prints the analyzer's per-prompt `score`. The
++same capture can be used from the existing API:
++
++```python
++outputs = llm.generate(prompts, sampling_params, use_hook=True)
++result = llm.analyze(
++    probes=outputs[0].probes,
++    analyzer_spec={"input_range": ranges, "attn_func": "sum_normalize"},
++)
++```
++
++## Checks and remaining work
++
++- Inspected the repository's `MiaLLM`, Q/K worker, analyzer, selected model
++  config and notebook; inspected vLLM-Metal's model lifecycle, runner, MLX
++  tensor bridge and supplied MLX-LM Qwen2 implementation.
++- Added `tests/use_cases/test_attntracker_metal_backend.py` for Q/K layout
++  conversion. **Tests and an Apple Silicon/vLLM-Metal end-to-end run were not
++  executed in this environment.**
++- The backend currently targets Qwen2, the selected model family. Hidden-state
++  capture and broader model-family support remain unimplemented. Multiprompt
++  generation depends on the non-paged runner's
++  sequential prefill behavior; verify request-to-probe ordering against the
++  target runtime before treating it as validated.
++- Verify capture, disk round-trip, steering output behavior, and cleanup on
++  the target Apple Silicon stack before declaring runtime parity.
+diff --git a/examples/demo_attntracker_metal.py b/examples/demo_attntracker_metal.py
+new file mode 100644
+index 0000000..0d369b5
+--- /dev/null
++++ b/examples/demo_attntracker_metal.py
+@@ -0,0 +1,50 @@
++"""Run Attention Tracker with real vLLM generation on vLLM-Metal."""
++from __future__ import annotations
++
++from pathlib import Path
++
++from vllm import SamplingParams
++
++from mia import MiaLLM, register_plugins
++
++
++ROOT = Path(__file__).resolve().parents[1]
++MODEL = "Qwen/Qwen2-1.5B-Instruct"
++CONFIG = ROOT / "model_configs" / "attention_tracker" / "Qwen2-1.5B-Instruct.json"
++PROMPTS = [
++    "Analyze and output the sentence attitude: This is for testing only.",
++    "Analyze and output the sentence attitude: Another test run.",
++]
++
++
++def main() -> None:
++    register_plugins()
++    llm = MiaLLM(
++        model=MODEL,
++        worker_name="capture_qk",
++        analyzer_name="attn_tracker",
++        config_file=str(CONFIG),
++        enable_hook=True,
++    )
++    outputs = llm.generate(
++        PROMPTS,
++        sampling_params=SamplingParams(temperature=0.1, max_tokens=2),
++        use_hook=True,
++    )
++    ranges = []
++    for prompt in PROMPTS:
++        token_count = len(llm.tokenizer.encode(prompt))
++        split = token_count // 2
++        ranges.append([(0, split), (split, token_count)])
++    result = llm.analyze(
++        analyzer_spec={
++            "input_range": ranges,
++            "attn_func": "sum_normalize",
++        },
++        probes=outputs[0].probes,
++    )
++    print(result)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/mia/analyzers/attention_tracker_analyzer.py b/mia/analyzers/attention_tracker_analyzer.py
+index 3d39df3..652018c 100644
+--- a/mia/analyzers/attention_tracker_analyzer.py
++++ b/mia/analyzers/attention_tracker_analyzer.py
+@@ -81,6 +81,8 @@ class AttntrackerAnalyzer:
+             for i, (q_last, k_all) in enumerate(zip(q_list, k_list)):
+                 seq_len = k_all.shape[0]
+ 
++                if q_last.dim() == 2:
++                    q_last = q_last[-1]
+                 q_heads = q_last.view(config["num_attention_heads"], config["head_dim"])
+                 q_heads = q_heads.unsqueeze(0).unsqueeze(2)
+ 
+@@ -135,4 +137,3 @@ class AttntrackerAnalyzer:
+                 scores.extend(head_scores.tolist())
+             batch_scores.append(np.mean(scores))
+         return batch_scores
+-
+diff --git a/mia/backends/__init__.py b/mia/backends/__init__.py
+new file mode 100644
+index 0000000..1187dd7
+--- /dev/null
++++ b/mia/backends/__init__.py
+@@ -0,0 +1 @@
++"""Backend-specific integrations used by MIA."""
+diff --git a/mia/backends/vllm_metal.py b/mia/backends/vllm_metal.py
+new file mode 100644
+index 0000000..00e9163
+--- /dev/null
++++ b/mia/backends/vllm_metal.py
+@@ -0,0 +1,421 @@
++"""Qwen2 hooks for vLLM-Metal's MLX-backed model execution.
++
++Generation remains owned by vLLM-Metal. This module observes its MLX
++attention call and applies configured steering at the Qwen2 residual stream.
++"""
++from __future__ import annotations
++
++import contextlib
++import os
++import threading
++from dataclasses import dataclass, field
++from typing import Any
++
++import numpy as np
++import torch
++
++
++_PATCH_LOCK = threading.RLock()
++_ACTIVE: "_CaptureSession | None" = None
++
++
++def _mlx_numpy(value: Any, mx: Any) -> tuple[np.ndarray, torch.dtype]:
++    """Export MLX float arrays while preserving the MIA tensor dtype contract."""
++    dtype_map = {
++        mx.float16: (mx.float16, torch.float16),
++        mx.float32: (mx.float32, torch.float32),
++        mx.bfloat16: (mx.float32, torch.bfloat16),
++    }
++    export_dtype = dtype_map.get(value.dtype)
++    if export_dtype is None:
++        raise TypeError(f"Unsupported MLX Q/K dtype: {value.dtype}")
++    mlx_dtype, torch_dtype = export_dtype
++    exported = value.astype(mlx_dtype) if value.dtype == mx.bfloat16 else value
++    mx.eval(exported)
++    return np.asarray(exported), torch_dtype
++
++
++def _qk_tensors(
++    q: np.ndarray,
++    k: np.ndarray,
++    q_dtype: torch.dtype | None = None,
++    k_dtype: torch.dtype | None = None,
++    hookq_mode: str = "last_token",
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Convert post-RoPE Q/K arrays to the eager worker's flattened layout."""
++    if q.ndim != 4 or k.ndim != 4:
++        raise ValueError(f"Expected Q/K arrays [batch, heads, seq, dim], got {q.shape}, {k.shape}")
++    if q.shape[0] != k.shape[0]:
++        raise ValueError(f"Q/K batch dimensions differ: {q.shape[0]} != {k.shape[0]}")
++    if hookq_mode == "last_token":
++        q_rows = np.ascontiguousarray(q[:, :, -1, :].reshape(q.shape[0], -1))
++    elif hookq_mode == "all_tokens":
++        q_rows = np.ascontiguousarray(
++            q.transpose(0, 2, 1, 3).reshape(q.shape[0], q.shape[2], -1)
++        )
++    else:
++        raise ValueError(f"hookq_mode={hookq_mode!r} must be 'last_token' or 'all_tokens'")
++    k_rows = np.ascontiguousarray(k.transpose(0, 2, 1, 3).reshape(k.shape[0], k.shape[2], -1))
++    q_tensor, k_tensor = torch.from_numpy(q_rows.copy()), torch.from_numpy(k_rows.copy())
++    if q_dtype is not None:
++        q_tensor = q_tensor.to(q_dtype)
++    if k_dtype is not None:
++        k_tensor = k_tensor.to(k_dtype)
++    return q_tensor, k_tensor
++
++
++def _attention_scores(
++    q: np.ndarray,
++    k: np.ndarray,
++    heads: list[int],
++    scale: float,
++) -> torch.Tensor:
++    """Compute selected-head last-token attention probabilities."""
++    query = q[0, :, -1, :].astype(np.float32, copy=False)
++    keys = k[0].transpose(1, 0, 2).astype(np.float32, copy=False)
++    if keys.shape[0] < query.shape[0]:
++        if query.shape[0] % keys.shape[0]:
++            raise ValueError("Qwen2 query-head count must be divisible by key/value-head count")
++        keys = np.repeat(keys, query.shape[0] // keys.shape[0], axis=0)
++    logits = np.einsum("hd,hkd->hk", query, keys) * float(scale)
++    logits -= logits.max(axis=-1, keepdims=True)
++    probabilities = np.exp(logits)
++    probabilities /= probabilities.sum(axis=-1, keepdims=True)
++    selected = np.ascontiguousarray(probabilities[np.asarray(heads, dtype=np.int64), None, :])
++    return torch.from_numpy(selected.copy())
++
++
++@dataclass
++class _CaptureSession:
++    prompts: list[Any]
++    prompt_lens: list[int]
++    output_layers: set[int] | None
++    hookq_mode: str
++    configs: list[dict[str, Any]]
++    capture_qk: bool
++    capture_mode: str
++    layer_to_heads: dict[int, list[int]]
++    qk_cache: list[dict[str, dict[str, Any]]] = field(default_factory=list)
++    config: dict[str, Any] | None = None
++    layer_ids: dict[int, int] = field(default_factory=dict)
++    norm_layers: dict[int, int] = field(default_factory=dict)
++    next_layer_id: int = 0
++    next_prompt: int = 0
++    current_prompt: int | None = None
++    current_layer: int | None = None
++    current_prefill_complete: bool = False
++    last_request: int | None = None
++    requested_steer: bool = False
++    steering_cache: dict[str, dict[str, np.ndarray]] = field(default_factory=dict)
++
++    def __post_init__(self) -> None:
++        self.qk_cache = [{} for _ in self.prompts]
++
++    def begin_layer(
++        self, block: Any, input_value: Any
++    ) -> tuple[int, int | None, int | None]:
++        layer_id = self.layer_ids.get(id(block))
++        if layer_id is None:
++            layer_id = self.next_layer_id
++            self.layer_ids[id(block)] = layer_id
++            self.norm_layers[id(block.post_attention_layernorm)] = layer_id
++            self.next_layer_id += 1
++
++        if layer_id == 0:
++            if self.current_prefill_complete:
++                self.next_prompt += 1
++                self.current_prefill_complete = False
++            self.current_prompt = (
++                self.next_prompt if self.next_prompt < len(self.prompts) else None
++            )
++            if self.current_prompt is not None:
++                self.last_request = self.current_prompt
++            elif self.prompts:
++                self.last_request = len(self.prompts) - 1
++            if not self.capture_qk and self.current_prompt is not None:
++                if int(input_value.shape[-2]) >= self.prompt_lens[self.current_prompt]:
++                    self.current_prefill_complete = True
++        previous_layer = self.current_layer
++        previous_request = self.last_request
++        self.current_layer = layer_id
++        return layer_id, previous_layer, previous_request
++
++    def capture_attention(self, q: Any, k: Any, mx: Any) -> None:
++        if not self.capture_qk:
++            return
++        layer_id = self.current_layer
++        request_idx = self.current_prompt
++        if layer_id is None or request_idx is None:
++            return
++
++        if len(q.shape) != 4 or len(k.shape) != 4:
++            raise ValueError(f"Qwen2 attention returned unexpected Q/K shapes: {q.shape}, {k.shape}")
++        if int(q.shape[0]) != 1:
++            raise RuntimeError(
++                "vLLM-Metal Qwen2 capture currently requires one request per "
++                f"forward pass; observed batch size {q.shape[0]}"
++            )
++        prompt_len = self.prompt_lens[request_idx]
++        if layer_id == 0 and not self.current_prefill_complete:
++            if int(q.shape[2]) < prompt_len:
++                return
++            self.current_prefill_complete = True
++        if not self.current_prefill_complete:
++            return
++        if self.output_layers is not None and layer_id not in self.output_layers:
++            return
++
++        q_np, q_dtype = _mlx_numpy(q, mx)
++        k_np, k_dtype = _mlx_numpy(k, mx)
++        if self.config is None:
++            heads, head_dim = int(q_np.shape[1]), int(q_np.shape[3])
++            self.config = {
++                "num_attention_heads": heads,
++                "num_key_value_heads": int(k_np.shape[1]),
++                "head_dim": head_dim,
++                "hidden_size": heads * head_dim,
++                "attention_multiplier": float(1.0 / np.sqrt(head_dim)),
++            }
++        name = f"model.layers.{layer_id}.self_attn"
++        entry = self.qk_cache[request_idx].setdefault(
++            name,
++            (
++                {
++                    "scores": [],
++                    "heads": self.layer_to_heads.get(layer_id, [0]),
++                    "layer_num": layer_id,
++                    "hookq_mode": self.hookq_mode,
++                    "capture": "score",
++                }
++                if self.capture_mode == "score"
++                else {
++                    "q": [],
++                    "k_all": [],
++                    "layer_num": layer_id,
++                    "hookq_mode": self.hookq_mode,
++                }
++            ),
++        )
++        if self.capture_mode == "score":
++            entry["scores"].append(
++                _attention_scores(
++                    q_np,
++                    k_np,
++                    entry["heads"],
++                    float(self.config["attention_multiplier"]),
++                )
++            )
++        else:
++            q_tensor, k_tensor = _qk_tensors(
++                q_np, k_np, q_dtype, k_dtype, self.hookq_mode
++            )
++            entry["q"].append(q_tensor[0])
++            entry["k_all"].append(k_tensor[0])
++
++    def steer_input(self, norm: Any, value: Any, mx: Any) -> Any:
++        layer_id = self.norm_layers.get(id(norm))
++        request_idx = self.last_request
++        if layer_id is None or request_idx is None:
++            return value
++        cfg = self.configs[request_idx]
++        steer = cfg.get("steer")
++        if not isinstance(steer, dict) or not steer:
++            return value
++        if not _targets_layer(steer.get("optimal_layer", -1), layer_id):
++            return value
++
++        phase = steer.get("phase", "both")
++        if phase not in ("prefill", "decode", "both"):
++            raise ValueError(f"steering.phase={phase!r} is invalid")
++        is_prefill = int(value.shape[-2]) > 1
++        if phase == "prefill" and not is_prefill or phase == "decode" and is_prefill:
++            return value
++        positions = steer.get(
++            "positions",
++            "all_tokens" if steer.get("apply_at_all_positions", True) else "last_token",
++        )
++        if positions not in ("all_tokens", "last_token"):
++            raise ValueError(f"steering.positions={positions!r} is invalid")
++
++        path = os.path.expanduser(str(steer.get("vector_path", "")))
++        data = self.steering_cache.get(path)
++        if data is None:
++            data = _load_steering_data(steer)
++            self.steering_cache[path] = data
++        vector = mx.array(data["dir"], dtype=value.dtype)
++        if vector.size != value.shape[-1]:
++            raise ValueError(
++                f"Steering vector width {vector.size} does not match model width {value.shape[-1]}"
++            )
++        selected = value[..., -1:, :] if positions == "last_token" else value
++        if steer.get("method", "adjust_rs") == "add_vector":
++            changed = selected + float(steer.get("coefficient", 0)) * vector
++        elif steer.get("method", "adjust_rs") == "adjust_rs":
++            avg_proj = mx.array(data["avg_proj"], dtype=value.dtype)
++            projection = (selected * vector).sum(axis=-1, keepdims=True)
++            changed = selected + (avg_proj - projection) * vector
++        else:
++            raise ValueError(f"Unknown steering method: {steer.get('method')!r}")
++        self.requested_steer = True
++        if positions == "last_token":
++            return mx.concatenate((value[..., :-1, :], changed), axis=-2)
++        return changed
++
++    def probes(self) -> dict[str, Any]:
++        if self.config is None:
++            raise RuntimeError("vLLM-Metal Qwen2 instrumentation captured no Q/K values")
++        layer_sets = [set(per_prompt) for per_prompt in self.qk_cache]
++        expected_layers = set.union(*layer_sets) if layer_sets else set()
++        if not expected_layers:
++            raise RuntimeError("vLLM-Metal Qwen2 instrumentation captured no Q/K values")
++        for prompt_idx, layers in enumerate(layer_sets):
++            missing = expected_layers - layers
++            if missing:
++                raise RuntimeError(
++                    f"vLLM-Metal Qwen2 capture missed layers {sorted(missing)} "
++                    f"for prompt {prompt_idx}"
++                )
++        merged: dict[str, dict[str, Any]] = {}
++        for per_prompt in self.qk_cache:
++            for name, entry in per_prompt.items():
++                target = merged.setdefault(
++                    name,
++                    {
++                        "q": [],
++                        "k_all": [],
++                        "layer_num": entry["layer_num"],
++                        "hookq_mode": self.hookq_mode,
++                    },
++                )
++                if self.capture_mode == "score":
++                    target["scores"] = []
++                    target["heads"] = entry["heads"]
++                    target["capture"] = "score"
++                    target["scores"].extend(entry["scores"])
++                else:
++                    target["q"].extend(entry["q"])
++                    target["k_all"].extend(entry["k_all"])
++        if not merged:
++            raise RuntimeError("vLLM-Metal Qwen2 instrumentation captured no Q/K values")
++        return {"config": dict(self.config), "qk_cache": merged}
++
++
++def _targets_layer(target: Any, layer_id: int) -> bool:
++    if target == "all":
++        return True
++    if isinstance(target, (list, tuple)):
++        return any(str(value) == str(layer_id) for value in target)
++    try:
++        return int(target) == layer_id
++    except (TypeError, ValueError):
++        return False
++
++
++def _load_steering_data(config: dict[str, Any]) -> dict[str, np.ndarray]:
++    path = os.path.expanduser(str(config.get("vector_path", "")))
++    if not path or not os.path.isfile(path):
++        raise FileNotFoundError(f"Steering vector not found at: {path}")
++    loaded = torch.load(path, map_location="cpu", weights_only=False)
++    if "dir" not in loaded:
++        raise KeyError(f"Steering vector {path!r} has no 'dir' entry")
++    vector = loaded["dir"]
++    if isinstance(vector, torch.Tensor):
++        vector = vector.detach().float().cpu().numpy()
++    result = {"dir": np.asarray(vector, dtype=np.float32)}
++    if config.get("method", "adjust_rs") == "adjust_rs":
++        avg_proj = loaded.get("avg_proj")
++        if avg_proj is None:
++            raise KeyError(f"Steering vector {path!r} has no 'avg_proj' entry")
++        if isinstance(avg_proj, torch.Tensor):
++            avg_proj = avg_proj.detach().float().cpu().numpy()
++        result["avg_proj"] = np.asarray(avg_proj, dtype=np.float32)
++    return result
++
++
++@contextlib.contextmanager
++def instrument_qwen2(
++    *,
++    prompts: list[Any],
++    prompt_lens: list[int],
++    output_layers: set[int] | None,
++    hookq_mode: str,
++    configs: list[dict[str, Any]],
++    capture_qk: bool = True,
++    capture_mode: str = "qk",
++    layer_to_heads: dict[int, list[int]] | None = None,
++):
++    """Temporarily instrument the actual vLLM-Metal Qwen2 forward path."""
++    global _ACTIVE
++    if len(prompts) != len(prompt_lens) or len(prompts) != len(configs):
++        raise ValueError("Metal instrumentation requires one token length and config per prompt")
++    if capture_mode not in ("qk", "score"):
++        raise ValueError(f"qk_capture={capture_mode!r} must be 'qk' or 'score'")
++
++    with _PATCH_LOCK:
++        try:
++            import mlx.core as mx
++            import mlx_lm.models.qwen2 as qwen2
++        except ImportError as exc:
++            raise RuntimeError(
++                "Metal instrumentation requires the installed mlx-lm Qwen2 implementation"
++            ) from exc
++
++        session = _CaptureSession(
++            prompts=prompts,
++            prompt_lens=prompt_lens,
++            output_layers=output_layers,
++            hookq_mode=hookq_mode,
++            configs=configs,
++            capture_qk=capture_qk,
++            capture_mode=capture_mode,
++            layer_to_heads=layer_to_heads or {},
++        )
++        original_sdpa = qwen2.scaled_dot_product_attention
++        original_block_call = qwen2.TransformerBlock.__call__
++        patched_norm_classes: dict[type, Any] = {}
++        _ACTIVE = session
++
++        def capture_sdpa(q: Any, k: Any, *args: Any, **kwargs: Any) -> Any:
++            if _ACTIVE is not None:
++                _ACTIVE.capture_attention(q, k, mx)
++            return original_sdpa(q, k, *args, **kwargs)
++
++        def block_call(block: Any, *args: Any, **kwargs: Any) -> Any:
++            active = _ACTIVE
++            if active is None:
++                return original_block_call(block, *args, **kwargs)
++            input_value = args[0] if args else kwargs.get("x")
++            if input_value is None:
++                raise TypeError("Qwen2 TransformerBlock requires its hidden-state input")
++            layer_id, previous_layer, previous_request = active.begin_layer(
++                block, input_value
++            )
++            norm_cls = type(block.post_attention_layernorm)
++            if norm_cls not in patched_norm_classes:
++                original_norm_call = norm_cls.__call__
++                patched_norm_classes[norm_cls] = original_norm_call
++
++                def norm_call(norm: Any, value: Any, *norm_args: Any, **norm_kwargs: Any) -> Any:
++                    session_now = _ACTIVE
++                    if session_now is not None:
++                        value = session_now.steer_input(norm, value, mx)
++                    return original_norm_call(norm, value, *norm_args, **norm_kwargs)
++
++                norm_cls.__call__ = norm_call
++            try:
++                return original_block_call(block, *args, **kwargs)
++            finally:
++                active.current_layer = previous_layer
++                if previous_layer is not None:
++                    active.last_request = previous_request
++
++        qwen2.scaled_dot_product_attention = capture_sdpa
++        qwen2.TransformerBlock.__call__ = block_call
++        try:
++            yield session
++        finally:
++            qwen2.scaled_dot_product_attention = original_sdpa
++            qwen2.TransformerBlock.__call__ = original_block_call
++            for norm_cls, original_call in patched_norm_classes.items():
++                norm_cls.__call__ = original_call
++            _ACTIVE = None
+diff --git a/mia/llm.py b/mia/llm.py
+index 4eb8ee6..51f33e0 100644
+--- a/mia/llm.py
++++ b/mia/llm.py
+@@ -121,11 +121,21 @@ class MiaLLM:
+         worker = analyzer_entry = None
+         if worker_name or analyzer_name:
+             vllm.plugins.load_general_plugins()
++        metal_enabled = "metal" in {
++            name.strip().lower()
++            for name in os.environ.get("VLLM_PLUGINS", "").split(",")
++            if name.strip()
++        }
+         if worker_name:
+             worker_entry = PluginRegistry.get_worker(worker_name)
+             if worker_entry is None:
+                 raise ValueError(f"Unknown worker: {worker_name!r}. "
+                                  f"Available: {PluginRegistry.list_workers()}")
++            if metal_enabled and worker_name not in ("capture_qk", "steer"):
++                raise ValueError(
++                    f"Worker {worker_name!r} has no vLLM-Metal implementation. "
++                    "Metal currently supports capture_qk and steer."
++                )
+             worker = worker_entry.path
+         if analyzer_name:
+             analyzer_entry = PluginRegistry.get_analyzer(analyzer_name)
+@@ -136,6 +146,10 @@ class MiaLLM:
+         llm_kwargs = dict(vllm_kwargs)
+         if download_dir is not None:
+             llm_kwargs['download_dir'] = download_dir
++        if metal_enabled:
++            # vLLM-Metal executes MLX models rather than vLLM's torch Worker
++            # extension interface; MIA instruments its Qwen2 forward path.
++            worker = None
+         # lazy: keep mia.core._plugin and mia.core.hooks out of import mia
+         from mia.core._plugin import engine_hints
+         with engine_hints(qk_score=self._qk_capture == "score"):
+@@ -148,6 +162,7 @@ class MiaLLM:
+ 
+         self.tokenizer = self.llm.get_tokenizer()
+         self.llm_engine = self.llm.llm_engine
++        self._metal_enabled = metal_enabled
+ 
+         self._model_dims = None
+         try:
+@@ -348,15 +363,73 @@ class MiaLLM:
+                                     "min_p", "n", "seed", "stop", "stop_token_ids",
+                                     "presence_penalty", "frequency_penalty",
+                                     "repetition_penalty")}
+-        PROF.incr("miallm.generate.calls")
+-        PROF.gauge("miallm.prompts", len(prompts))
+-        with PROF.timed("miallm.generate"):
+-            if all(sp is sp_list[0] for sp in sp_list):
+-                outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+-            else:
+-                outputs = self.llm.generate(prompts, sp_list, **passthrough)
+-
+-        if hook and self.worker_name and not save_to_disk:
++        metal_session = None
++        if hook and self._metal_enabled and self.worker_name in ("capture_qk", "steer"):
++            from mia.backends.vllm_metal import instrument_qwen2
++
++            prompt_lens = [self._prompt_token_len(prompt) for prompt in prompts]
++            if any(length is None for length in prompt_lens):
++                raise ValueError(
++                    "vLLM-Metal MIA instrumentation needs token lengths for every prompt"
++                )
++            request_configs = [
++                dict(sp.extra_args or {})
++                for sp in sp_list
++            ]
++            capture_modes = {
++                config.get("qk_capture", self._qk_capture)
++                for config in request_configs
++            }
++            if len(capture_modes) != 1:
++                raise ValueError(
++                    "A vLLM-Metal generate batch must use one qk_capture mode"
++                )
++            selected_layers = set(self.layer_to_heads) or None
++            with instrument_qwen2(
++                prompts=prompts,
++                prompt_lens=[int(length) for length in prompt_lens],
++                output_layers=selected_layers,
++                hookq_mode=self._hookq_mode,
++                configs=request_configs,
++                capture_qk=self.worker_name == "capture_qk",
++                capture_mode=next(iter(capture_modes)),
++                layer_to_heads=self.layer_to_heads,
++            ) as metal_session:
++                PROF.incr("miallm.generate.calls")
++                PROF.gauge("miallm.prompts", len(prompts))
++                with PROF.timed("miallm.generate"):
++                    if all(sp is sp_list[0] for sp in sp_list):
++                        outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
++                    else:
++                        outputs = self.llm.generate(prompts, sp_list, **passthrough)
++            if self.worker_name == "capture_qk":
++                metal_probes = metal_session.probes()
++                if save_to_disk:
++                    from mia.core.delivery.artifact_writer import write_artifact
++
++                    write_artifact(
++                        "qk",
++                        metal_probes,
++                        os.path.join(self._hook_dir, str(run_id)),
++                        self._hookq_mode,
++                        0,
++                        use_safetensors=False,
++                        force_pt=True,
++                        pt_filename="qk.pt",
++                    )
++                elif outputs:
++                    outputs[0].probes = metal_probes
++        else:
++            PROF.incr("miallm.generate.calls")
++            PROF.gauge("miallm.prompts", len(prompts))
++            with PROF.timed("miallm.generate"):
++                if all(sp is sp_list[0] for sp in sp_list):
++                    outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
++                else:
++                    outputs = self.llm.generate(prompts, sp_list, **passthrough)
++
++        if (hook and self.worker_name and not save_to_disk
++                and not (self._metal_enabled and self.worker_name == "capture_qk")):
+             # lazy: keep mia.core.delivery out of import mia
+             from mia.core.delivery.delivered_probes import attach_lazy, merge_source, pending
+             srcs = [merge_source(o) for o in outputs]
+@@ -409,4 +482,3 @@ class MiaLLM:
+             self.close()
+         except Exception:
+             pass
+-
+diff --git a/pyproject.toml b/pyproject.toml
+index 028c317..3ad1201 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -34,6 +34,15 @@ cuda = [
+     "zstandard==0.25.0",
+ ]
+ 
++# vLLM-Metal's MLX runtime is an additional profile; CPU/CUDA profiles and
++# their existing pins remain unchanged.
++metal = [
++    "vllm==0.29.0",
++    "vllm-metal",
++    "mlx",
++    "mlx-lm",
++]
++
+ [dependency-groups]
+ test = ["pytest"]
+ # Same-machine numerical comparison runner shares the existing test tools.
+@@ -61,6 +70,8 @@ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854
+ # These profiles are deliberately separate, even on a CUDA-capable CPU host.
+ conflicts = [
+     [{ extra = "cpu" }, { extra = "cuda" }],
++    [{ extra = "cpu" }, { extra = "metal" }],
++    [{ extra = "cuda" }, { extra = "metal" }],
+ ]
+ 
+ [tool.uv.sources]
+diff --git a/tests/use_cases/test_attntracker_metal_backend.py b/tests/use_cases/test_attntracker_metal_backend.py
+new file mode 100644
+index 0000000..7c8678b
+--- /dev/null
++++ b/tests/use_cases/test_attntracker_metal_backend.py
+@@ -0,0 +1,48 @@
++"""Shape and layout contract for the vLLM-Metal Qwen2 Q/K bridge."""
++import numpy as np
++import torch
++
++from mia.backends.vllm_metal import _attention_scores, _qk_tensors
++
++
++def test_qk_tensors_keep_last_query_and_flatten_kv_heads():
++    q = np.arange(1 * 4 * 3 * 2, dtype=np.float32).reshape(1, 4, 3, 2)
++    k = np.arange(1 * 2 * 5 * 2, dtype=np.float32).reshape(1, 2, 5, 2)
++
++    q_tensor, k_tensor = _qk_tensors(q, k)
++
++    assert q_tensor.shape == (1, 8)
++    assert k_tensor.shape == (1, 5, 4)
++    torch.testing.assert_close(q_tensor[0], torch.from_numpy(q[0, :, -1, :].reshape(-1)))
++    torch.testing.assert_close(
++        k_tensor[0],
++        torch.from_numpy(k.transpose(0, 2, 1, 3).reshape(1, 5, 4)[0]),
++    )
++
++
++def test_qk_tensors_reject_non_attention_layouts():
++    with np.testing.assert_raises(ValueError):
++        _qk_tensors(np.zeros((1, 4, 2)), np.zeros((1, 2, 5, 2)))
++
++
++def test_qk_tensors_preserve_all_query_tokens_when_requested():
++    q = np.arange(1 * 4 * 3 * 2, dtype=np.float32).reshape(1, 4, 3, 2)
++    k = np.zeros((1, 2, 5, 2), dtype=np.float32)
++
++    q_tensor, _ = _qk_tensors(q, k, hookq_mode="all_tokens")
++
++    assert q_tensor.shape == (1, 3, 8)
++    torch.testing.assert_close(
++        q_tensor[0],
++        torch.from_numpy(q.transpose(0, 2, 1, 3).reshape(1, 3, 8)[0]),
++    )
++
++
++def test_attention_scores_match_selected_gqa_heads():
++    q = np.ones((1, 4, 1, 2), dtype=np.float32)
++    k = np.ones((1, 2, 3, 2), dtype=np.float32)
++
++    scores = _attention_scores(q, k, [1, 3], scale=0.5)
++
++    assert scores.shape == (2, 1, 3)
++    torch.testing.assert_close(scores, torch.full((2, 1, 3), 1 / 3))
