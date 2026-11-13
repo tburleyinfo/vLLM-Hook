@@ -1,0 +1,512 @@
+diff --git a/TRANSLATION.md b/TRANSLATION.md
+new file mode 100644
+index 0000000..df4e4cd
+--- /dev/null
++++ b/TRANSLATION.md
+@@ -0,0 +1,50 @@
++# vLLM-Metal translation: Attention Tracker
++
++## Implemented
++
++- Added an opt-in `metal` dependency profile (`vllm-metal`) alongside the existing CPU and CUDA profiles. The existing pins and installation paths are unchanged.
++- Added `mia.backends.metal.capture_qk` / `MetalQKCapture`. When vLLM-Metal paged SDPA is enabled, it observes the target SDPA `prepare_sdpa_qkv` seam, captures post-RoPE Q/K arrays, exports MLX bfloat16 safely through float32, and returns the existing analyzer's `{"config": ..., "qk_cache": ...}` probe contract.
++- Added a temporary MLX decoder-layer steering adapter using the existing `vector_path`, `method`, `coefficient`, and `optimal_layer` configuration fields. It restores wrapped layer classes and instance markers when closed.
++- Added focused steering lifecycle tests. Existing public MIA APIs and the CPU/CUDA implementations are unchanged.
++
++## Selected model and how to run
++
++The selected model config sets `hookq_mode` to `last_token`, which the new Q/K adapter accepts. However, the supplied target environment sets `VLLM_METAL_USE_PAGED_ATTENTION=0`; that selects the non-paged MLX attention path, which does not call the adapter's current SDPA capture seam. The adapter fails explicitly in this environment rather than returning an empty capture. A direct invocation for a future paged-path integration would have this form:
++
++```python
++from mia.backends.metal import capture_qk
++
++with capture_qk(metal_model_runner.model, hookq_mode="last_token") as capture:
++    output = vllm_llm.generate(prompt, sampling_params)
++probes = capture.probes()
++scores = mia_llm.analyze(
++    analyzer_spec={"input_range": input_range, "attn_func": "sum_normalize"},
++    probes=probes,
++)
++```
++
++For the target process settings, launch with:
++
++```bash
++VLLM_ENABLE_V1_MULTIPROCESSING=0 \
++VLLM_METAL_USE_PAGED_ATTENTION=0 \
++VLLM_METAL_MEMORY_FRACTION=auto \
++VLLM_PLUGINS=metal \
++python your_attention_tracker_driver.py
++```
++
++This is **not yet an end-to-end runnable Attention Tracker path**: the target environment uses the non-paged execution path; this repository does not have a supported capture seam for that path, a way to retrieve the Metal worker's loaded MLX model in `MiaLLM`, a way to enter capture around worker execution, or request-to-probe correlation. The snippet documents a future paged-path adapter boundary, not a runnable driver. The current notebook's `MiaLLM.generate()` therefore remains CPU/CUDA-only for Q/K capture. The `MiaClient`/`vllm serve` path is not connected either.
++
++## Remaining work
++
++- Integrate the MLX adapter into the vLLM-Metal worker and `MiaLLM`/`MiaClient` request lifecycles, preserving enable/disable, batching, cancellation, per-request probes, and disk delivery behavior. In particular, collect only the request's prefill Q/K for this config and attach the resulting probes to the corresponding existing `RequestOutput`.
++- Steering is currently an explicit model-scoped helper, not a MIA worker/API integration. It only supports `phase="both"` and `positions="all_tokens"` and cannot route distinct steering configurations to requests in a batch. Implement routing through Metal's request metadata before claiming existing steering behavior is preserved.
++- Implement full `all_tokens` Q/K capture, including reconstructing cached prefix keys, and test chunked prefill, decode, multi-request batches, and cleanup. The present adapter intentionally rejects `all_tokens` rather than emit incomplete key histories.
++- Implement capture on the selected non-paged MLX attention path, or establish an allowed target setting with paged SDPA that preserves the requested behavior.
++- Add real Apple Silicon integration tests using vLLM generation and the selected Qwen2 model; verify scores, request isolation, unchanged generated output, and lifecycle cleanup. The repository's supplied target source does not declare a compatible vLLM-Metal version or an installation recipe, so the new dependency profile is unpinned pending that compatibility declaration.
++
++## Checks performed
++
++- Inspected the Attention Tracker notebook, selected model config, existing Q/K worker/analyzer/API, and the declared vLLM-Metal SDPA wrapper, Q/K preparation, model walker, and worker/model-runner lifecycle sources.
++- Added `tests/use_cases/test_attntracker_metal.py`; tests were not run because this environment exposes no command-execution tool and no Apple Silicon runtime was supplied.
++- No model generation or runtime correctness validation was performed.
+diff --git a/mia/backends/__init__.py b/mia/backends/__init__.py
+new file mode 100644
+index 0000000..1acfb23
+--- /dev/null
++++ b/mia/backends/__init__.py
+@@ -0,0 +1 @@
++"""Backend-specific integrations for MIA."""
+diff --git a/mia/backends/metal/__init__.py b/mia/backends/metal/__init__.py
+new file mode 100644
+index 0000000..30c08bd
+--- /dev/null
++++ b/mia/backends/metal/__init__.py
+@@ -0,0 +1,6 @@
++"""MIA hooks for vLLM-Metal's MLX-backed models."""
++
++from mia.backends.metal.attention import MetalQKCapture, capture_qk
++from mia.backends.metal.steering import install_activation_steering
++
++__all__ = ["MetalQKCapture", "capture_qk", "install_activation_steering"]
+diff --git a/mia/backends/metal/attention.py b/mia/backends/metal/attention.py
+new file mode 100644
+index 0000000..32a67ef
+--- /dev/null
++++ b/mia/backends/metal/attention.py
+@@ -0,0 +1,213 @@
++"""Q/K capture at vLLM-Metal's MLX SDPA preparation seam."""
++from __future__ import annotations
++
++import contextvars
++import os
++import threading
++from contextlib import contextmanager
++from typing import Any, Iterator
++
++import numpy as np
++import torch
++
++
++_ACTIVE: contextvars.ContextVar["MetalQKCapture | None"] = contextvars.ContextVar(
++    "mia_metal_qk_capture", default=None
++)
++_PATCH_LOCK = threading.RLock()
++_PATCHED_MODULE = None
++_ORIGINAL_PREPARE = None
++
++
++def _attention_layers(model: Any) -> list[tuple[int, Any]]:
++    from vllm_metal.attention.patching import find_attn_attr, find_layers
++
++    found = []
++    for layer_idx, layer in enumerate(find_layers(model)):
++        attr = find_attn_attr(layer)
++        if attr is None:
++            continue
++        attention = getattr(layer, attr)
++        attention = getattr(attention, "_inner", attention)
++        found.append((layer_idx, attention))
++    if not found:
++        raise ValueError(f"No vLLM-Metal SDPA attention layers found in {type(model).__name__}")
++    return found
++
++
++def _install_prepare_hook() -> None:
++    global _PATCHED_MODULE, _ORIGINAL_PREPARE
++    module = __import__(
++        "vllm_metal.attention.impls.sdpa", fromlist=["prepare_sdpa_qkv"]
++    )
++    if _PATCHED_MODULE is not None:
++        raise RuntimeError("MIA Metal Q/K hook is already installed")
++    original = module.prepare_sdpa_qkv
++
++    def capture_prepare(inner, *args, **kwargs):
++        result = original(inner, *args, **kwargs)
++        session = _ACTIVE.get()
++        if session is not None:
++            session._record(inner, result[0], result[1])
++        return result
++
++    module.prepare_sdpa_qkv = capture_prepare
++    _PATCHED_MODULE = module
++    _ORIGINAL_PREPARE = original
++
++
++def _export_mlx(value: Any) -> np.ndarray:
++    import mlx.core as mx
++
++    # MLX bfloat16 does not implement the NumPy buffer protocol.
++    return np.asarray(value.astype(mx.float32))
++
++
++class MetalQKCapture:
++    """Collect post-RoPE Q/K arrays without changing model outputs.
++
++    Supply the loaded MLX model, then enter this context around one
++    ``vllm.LLM.generate`` call. ``probes`` returns the same qk_cache/config
++    shape consumed by MIA's existing attention-tracker analyzer.
++    """
++
++    def __init__(self, model: Any, *, hookq_mode: str = "last_token") -> None:
++        if os.environ.get("VLLM_METAL_USE_PAGED_ATTENTION", "1") != "1":
++            raise RuntimeError(
++                "The Metal Q/K adapter currently observes vLLM-Metal's paged SDPA path, "
++                "but VLLM_METAL_USE_PAGED_ATTENTION is disabled. The non-paged MLX "
++                "attention path needs a separate capture seam."
++            )
++        if hookq_mode != "last_token":
++            raise ValueError(
++                "The Metal Q/K adapter currently supports hookq_mode='last_token' only; "
++                "all_tokens capture needs full cached-key reconstruction."
++            )
++        self.model = model
++        self.hookq_mode = hookq_mode
++        self._layers = _attention_layers(model)
++        self._layer_by_object = {id(attn): layer for layer, attn in self._layers}
++        self._captured: dict[int, list[dict[str, torch.Tensor]]] = {}
++        self._context_token = None
++
++    def __enter__(self) -> "MetalQKCapture":
++        _PATCH_LOCK.acquire()
++        try:
++            if _ACTIVE.get() is not None:
++                raise RuntimeError("Nested MIA Metal Q/K capture contexts are not supported")
++            _install_prepare_hook()
++            self._context_token = _ACTIVE.set(self)
++            return self
++        except Exception:
++            _PATCH_LOCK.release()
++            raise
++
++    def __exit__(self, exc_type, exc_value, traceback) -> bool:
++        global _PATCHED_MODULE, _ORIGINAL_PREPARE
++        try:
++            if self._context_token is not None:
++                _ACTIVE.reset(self._context_token)
++                self._context_token = None
++            if _PATCHED_MODULE is not None:
++                _PATCHED_MODULE.prepare_sdpa_qkv = _ORIGINAL_PREPARE
++                _PATCHED_MODULE = None
++                _ORIGINAL_PREPARE = None
++        finally:
++            _PATCH_LOCK.release()
++        return False
++
++    def _record(self, attention: Any, queries: Any, keys: Any) -> None:
++        layer = self._layer_by_object.get(id(attention))
++        if layer is None:
++            return
++        import mlx.core as mx
++
++        mx.eval(queries, keys)
++        q_array = _export_mlx(queries)
++        k_array = _export_mlx(keys)
++        if q_array.ndim != 4 or k_array.ndim != 4:
++            raise ValueError(
++                f"Expected Metal SDPA Q/K in [batch, heads, tokens, dim] layout; "
++                f"got Q={q_array.shape}, K={k_array.shape}"
++            )
++        if q_array.shape[0] != k_array.shape[0]:
++            raise ValueError("Metal SDPA Q/K batch dimensions do not match")
++        if q_array.shape[2] == 1:
++            return
++
++        rows = self._captured.setdefault(layer, [])
++        for batch_idx in range(q_array.shape[0]):
++            q = q_array[batch_idx].transpose(1, 0, 2).reshape(q_array.shape[2], -1)
++            k = k_array[batch_idx].transpose(1, 0, 2).reshape(k_array.shape[2], -1)
++            q = q[-1:]
++            tensor_q = torch.from_numpy(np.ascontiguousarray(q)).clone()
++            tensor_k = torch.from_numpy(np.ascontiguousarray(k)).clone()
++            if rows:
++                previous = rows[batch_idx] if batch_idx < len(rows) else None
++                if previous is not None and previous["k_all"].shape[0] >= tensor_k.shape[0]:
++                    continue
++                if previous is not None:
++                    rows[batch_idx] = {"q": tensor_q, "k_all": tensor_k}
++                else:
++                    rows.append({"q": tensor_q, "k_all": tensor_k})
++            else:
++                rows.append({"q": tensor_q, "k_all": tensor_k})
++
++    def probes(self) -> dict[str, Any]:
++        """Return CPU probes compatible with ``AttntrackerAnalyzer``."""
++        if not self._captured:
++            raise RuntimeError("No Q/K values were captured by this Metal Q/K session")
++        config = _model_attention_config(self.model, self._layers)
++        qk_cache = {}
++        for layer_idx, rows in sorted(self._captured.items()):
++            if not rows:
++                continue
++            qk_cache[f"model.layers.{layer_idx}.self_attn.attn"] = {
++                "q": [row["q"] for row in rows],
++                "k_all": [row["k_all"] for row in rows],
++                "layer_num": layer_idx,
++                "hookq_mode": self.hookq_mode,
++            }
++        return {"config": config, "qk_cache": qk_cache}
++
++
++def _model_attention_config(model: Any, layers: list[tuple[int, Any]]) -> dict[str, int | float]:
++    args = getattr(model, "args", None)
++    if args is None:
++        args = getattr(getattr(model, "model", None), "args", None)
++    attention = layers[0][1]
++
++    def required(name: str, *alternatives: str) -> int:
++        for source in (args, attention):
++            for key in (name, *alternatives):
++                value = getattr(source, key, None) if source is not None else None
++                if value is not None:
++                    return int(value)
++        raise ValueError(f"Cannot resolve {name} from the loaded Metal model")
++
++    heads = required("num_attention_heads", "n_heads")
++    kv_heads = required("num_key_value_heads", "n_kv_heads")
++    try:
++        head_dim = required("head_dim")
++    except ValueError:
++        projection = getattr(attention, "q_proj", None)
++        weight = getattr(projection, "weight", None)
++        if weight is None:
++            raise
++        head_dim = int(weight.shape[0]) // heads
++    scale = getattr(attention, "scale", None)
++    if scale is None:
++        scale = head_dim**-0.5
++    return {
++        "num_attention_heads": heads,
++        "num_key_value_heads": kv_heads,
++        "head_dim": head_dim,
++        "attention_multiplier": float(scale),
++    }
++
++
++@contextmanager
++def capture_qk(model: Any, *, hookq_mode: str = "last_token") -> Iterator[MetalQKCapture]:
++    """Context-manager form of :class:`MetalQKCapture`."""
++    with MetalQKCapture(model, hookq_mode=hookq_mode) as capture:
++        yield capture
+diff --git a/mia/backends/metal/steering.py b/mia/backends/metal/steering.py
+new file mode 100644
+index 0000000..4f647cc
+--- /dev/null
++++ b/mia/backends/metal/steering.py
+@@ -0,0 +1,123 @@
++"""MLX decoder-layer activation steering for vLLM-Metal models."""
++from __future__ import annotations
++
++from typing import Any
++
++
++class MetalSteeringHandle:
++    """Owns temporary decoder-layer wrappers and restores them on close."""
++
++    def __init__(self, model: Any, config: dict[str, Any]) -> None:
++        import mlx.core as mx
++        from vllm_metal.attention.patching import find_layers
++
++        self._mx = mx
++        self._layers = find_layers(model)
++        self._config = dict(config)
++        self._originals: dict[type, Any] = {}
++        self._installed: list[Any] = []
++        self._closed = False
++        phase = self._config.get("phase", "both")
++        positions = self._config.get(
++            "positions",
++            "all_tokens" if self._config.get("apply_at_all_positions", True)
++            else "last_token",
++        )
++        if phase != "both" or positions != "all_tokens":
++            raise NotImplementedError(
++                "The Metal steering adapter currently supports phase='both' and "
++                "positions='all_tokens' only."
++            )
++
++        vector_path = self._config.get("vector_path")
++        if not vector_path:
++            raise ValueError("Metal steering requires steering.vector_path")
++        import torch
++
++        raw = torch.load(vector_path, map_location="cpu", weights_only=False)
++        direction = raw.get("dir")
++        if direction is None:
++            raise ValueError(f"Steering vector at {vector_path!r} has no 'dir' entry")
++        self._direction = mx.array(direction.detach().cpu().numpy() if torch.is_tensor(direction)
++                                   else direction)
++        self._average = raw.get("avg_proj")
++        if self._average is not None and torch.is_tensor(self._average):
++            self._average = float(self._average.item())
++        self._average = None if self._average is None else float(self._average)
++
++        target_layers = self._config.get("optimal_layer", "all")
++        if target_layers == "all":
++            selected = range(len(self._layers))
++        else:
++            raw_layers = target_layers if isinstance(target_layers, (list, tuple)) else [target_layers]
++            selected = sorted({int(index) for index in raw_layers
++                               if 0 <= int(index) < len(self._layers)})
++        if not selected:
++            raise ValueError("steering.optimal_layer selects no decoder layers")
++        try:
++            for layer_idx in selected:
++                layer = self._layers[layer_idx]
++                self._install_layer(type(layer), layer_idx, layer)
++        except Exception:
++            self.close()
++            raise
++
++    def _install_layer(self, layer_type: type, layer_idx: int, layer: Any) -> None:
++        if layer_type not in self._originals:
++            original = layer_type.__call__
++            self._originals[layer_type] = original
++            owner = self
++
++            def wrapped(instance, *args, **kwargs):
++                output = original(instance, *args, **kwargs)
++                if getattr(instance, "_mia_metal_steer_owner", None) is not owner:
++                    return output
++                if isinstance(output, tuple):
++                    if len(output) < 2:
++                        return output
++                    values = list(output)
++                    values[1] = owner._steer(values[1])
++                    return tuple(values)
++                return owner._steer(output)
++
++            layer_type.__call__ = wrapped
++        object.__setattr__(layer, "_mia_metal_steer_owner", self)
++        self._installed.append(layer)
++
++    def _steer(self, rows):
++        mx = self._mx
++        direction = self._direction.astype(rows.dtype)
++        method = self._config.get("method", "adjust_rs")
++        if method == "add_vector":
++            coefficient = float(self._config.get("coefficient", 0))
++            return rows + coefficient * direction
++        if method == "adjust_rs":
++            if self._average is None:
++                raise ValueError("adjust_rs steering vector must contain 'avg_proj'")
++            projection = (rows * direction).sum(axis=-1, keepdims=True)
++            return rows + (self._average - projection) * direction
++        raise ValueError(f"Unknown steering method: {method}")
++
++    def close(self) -> None:
++        if self._closed:
++            return
++        for layer in self._installed:
++            if getattr(layer, "_mia_metal_steer_owner", None) is self:
++                object.__delattr__(layer, "_mia_metal_steer_owner")
++        for layer_type, original in self._originals.items():
++            layer_type.__call__ = original
++        self._installed.clear()
++        self._originals.clear()
++        self._closed = True
++
++    def __enter__(self) -> "MetalSteeringHandle":
++        return self
++
++    def __exit__(self, exc_type, exc_value, traceback) -> bool:
++        self.close()
++        return False
++
++
++def install_activation_steering(model: Any, config: dict[str, Any]) -> MetalSteeringHandle:
++    """Install temporary activation steering using the existing steering config."""
++    return MetalSteeringHandle(model, config)
+diff --git a/pyproject.toml b/pyproject.toml
+index 028c317..df1cd22 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -34,6 +34,12 @@ cuda = [
+     "zstandard==0.25.0",
+ ]
+ 
++# vLLM-Metal selects its MLX runtime through the vLLM plugin system. Keep it
++# separate from the CPU/CUDA profiles: those are alternative vLLM builds.
++metal = [
++    "vllm-metal",
++]
++
+ [dependency-groups]
+ test = ["pytest"]
+ # Same-machine numerical comparison runner shares the existing test tools.
+@@ -61,6 +67,8 @@ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854
+ # These profiles are deliberately separate, even on a CUDA-capable CPU host.
+ conflicts = [
+     [{ extra = "cpu" }, { extra = "cuda" }],
++    [{ extra = "cpu" }, { extra = "metal" }],
++    [{ extra = "cuda" }, { extra = "metal" }],
+ ]
+ 
+ [tool.uv.sources]
+diff --git a/tests/use_cases/test_attntracker_metal.py b/tests/use_cases/test_attntracker_metal.py
+new file mode 100644
+index 0000000..af2ec1e
+--- /dev/null
++++ b/tests/use_cases/test_attntracker_metal.py
+@@ -0,0 +1,57 @@
++"""Focused lifecycle checks for the vLLM-Metal steering adapter."""
++import numpy as np
++import pytest
++import torch
++
++mx = pytest.importorskip("mlx.core")
++nn = pytest.importorskip("mlx.nn")
++pytest.importorskip("vllm_metal.attention.patching")
++
++from mia.backends.metal.steering import install_activation_steering
++
++
++class _Layer(nn.Module):
++    def __call__(self, x):
++        return x
++
++
++class _Model:
++    def __init__(self):
++        self.model = type("_Decoder", (), {"layers": [_Layer(), _Layer()]})()
++
++
++def test_additive_steering_restores_layer_call(tmp_path):
++    vector_path = tmp_path / "direction.pt"
++    torch.save({"dir": torch.tensor([1.0, 0.0])}, vector_path)
++    model = _Model()
++    layer = model.model.layers[0]
++    original = layer(mx.array([[2.0, 3.0]]))
++
++    with install_activation_steering(
++        model,
++        {
++            "vector_path": str(vector_path),
++            "method": "add_vector",
++            "coefficient": 0.5,
++            "optimal_layer": [0],
++        },
++    ):
++        steered = mx.eval(layer(mx.array([[2.0, 3.0]])))
++        np.testing.assert_allclose(np.asarray(steered), [[2.5, 3.0]])
++
++    restored = mx.eval(layer(mx.array([[2.0, 3.0]])))
++    np.testing.assert_allclose(np.asarray(restored), np.asarray(mx.eval(original)))
++
++
++def test_invalid_steering_method_fails_at_application(tmp_path):
++    vector_path = tmp_path / "direction.pt"
++    torch.save({"dir": torch.tensor([1.0, 0.0])}, vector_path)
++    model = _Model()
++    handle = install_activation_steering(
++        model, {"vector_path": str(vector_path), "method": "unknown", "optimal_layer": 0}
++    )
++    try:
++        with pytest.raises(ValueError, match="Unknown steering method"):
++            model.model.layers[0](mx.array([[2.0, 3.0]]))
++    finally:
++        handle.close()

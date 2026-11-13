@@ -1,0 +1,47 @@
+{
+  "condition": "no-graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "attention-notebook-01-01",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/Qwen2-1.5B-Instruct.json)",
+  "patch_sha256": "0cbb39d397b87a7163cf445ae1787333f8ba89705997f0897b75b85e0184c45c",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 286.89,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "completion.json": "db12035052af6593460c0ccc92f4a9fe0b77dc9620b3c6b43c748ba89ff1634d",
+      "metal_attention_tracker.md": "dbbe14d0d7e6f5bc6da0bb9446b0d2b6ebea634de6c2b30453e3568093ed530c"
+    },
+    "patch_sha256": "0cbb39d397b87a7163cf445ae1787333f8ba89705997f0897b75b85e0184c45c",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Implement Q/K capture on the requested VLLM_METAL_USE_PAGED_ATTENTION=0 MLX execution path.",
+      "Wire MLX Q/K capture through vLLM-Metal worker and MiaLLM/MiaClient request lifecycles, including in-memory probes and disk delivery.",
+      "Implement cached-prefix key reconstruction, full-token capture, chunked prefill, decode, and batched request isolation.",
+      "Integrate request-routed activation steering with MIA's existing worker/API and phase/position semantics.",
+      "Run Apple Silicon end-to-end generation tests for Qwen2-1.5B-Instruct and validate output parity, scores, and lifecycle cleanup.",
+      "Declare a compatible vLLM-Metal version and installation recipe before pinning the new dependency profile."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/Qwen2-1.5B-Instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}
