@@ -1030,6 +1030,16 @@ def validate_v2_runner_selected(config) -> None:
     except Exception:  # noqa: BLE001
         return
     if selected is False:
+        parallel_config = getattr(config, "parallel_config", None)
+        worker_cls = getattr(parallel_config, "worker_cls", "")
+        if isinstance(worker_cls, type):
+            worker_cls = f"{worker_cls.__module__}.{worker_cls.__name__}"
+        worker_ext = getattr(parallel_config, "worker_extension_cls", "")
+        if (
+            "vllm_metal.v1.worker.MetalWorker" in str(worker_cls)
+            and _kind_from_extension(worker_ext) == "qk"
+        ):
+            return
         raise UnsupportedRunnerError(
             "MIA requires vLLM's V2 model runner, but this engine config resolves to V1 "
             "(VllmConfig.use_v2_model_runner is False) with VLLM_USE_V2_MODEL_RUNNER unset. "
@@ -1207,7 +1217,14 @@ def _patched_create_engine_config(self, *args, **kwargs):
         self.worker_extension_cls = _WORKER_EXT_BY_KIND[worker_type]
     _wkind = _worker_kind(self.worker_extension_cls)
 
-    if os.environ.get("VLLM_USE_V2_MODEL_RUNNER") == "0":
+    metal_qk_runner = (
+        _wkind == "qk"
+        and "metal" in {
+            plugin.strip().lower()
+            for plugin in os.environ.get("VLLM_PLUGINS", "").split(",")
+        }
+    )
+    if os.environ.get("VLLM_USE_V2_MODEL_RUNNER") == "0" and not metal_qk_runner:
         raise RuntimeError(
             "MIA requires vLLM's V2 model runner, but VLLM_USE_V2_MODEL_RUNNER=0 is set. "
             "Unset it (0.29 defaults to V2) or set it to 1."
@@ -2725,4 +2742,3 @@ def register() -> None:
             break
         except Exception:
             pass
-

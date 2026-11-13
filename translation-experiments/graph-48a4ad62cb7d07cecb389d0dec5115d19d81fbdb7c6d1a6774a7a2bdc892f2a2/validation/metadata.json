@@ -1,0 +1,25 @@
+{
+  "condition": "graph",
+  "patch_sha256": "48a4ad62cb7d07cecb389d0dec5115d19d81fbdb7c6d1a6774a7a2bdc892f2a2",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "validation": "skipped",
+  "pilot": true,
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Implement Metal activation steering through the existing SteerWorker API.",
+      "Validate vLLM-Metal worker-extension installation, the Granite W4A16 model load, Q/K probe delivery, and analyzer scores on Apple Silicon.",
+      "Implement and validate paged-attention Q/K capture and support for additional MLX model architectures if they are required beyond the selected non-paged Granite use case."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/granite-3.1-2b-instruct-quantized.w4a16.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "experiment_id": "full-fresh-20261113-09",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/granite-3.1-2b-instruct-quantized.w4a16.json)",
+  "runtime_validation_required": false,
+  "validator_sha256": "a96dd7b92f17f75f2d491f8d17d5057d68f43e2ece76c3275a12b78efdaf527c"
+}

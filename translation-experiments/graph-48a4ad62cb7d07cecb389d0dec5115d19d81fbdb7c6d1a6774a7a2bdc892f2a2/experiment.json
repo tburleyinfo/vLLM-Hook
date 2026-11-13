@@ -1,0 +1,44 @@
+{
+  "condition": "graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "full-fresh-20261113-09",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/granite-3.1-2b-instruct-quantized.w4a16.json)",
+  "patch_sha256": "48a4ad62cb7d07cecb389d0dec5115d19d81fbdb7c6d1a6774a7a2bdc892f2a2",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 450.97,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "attention_tracker.md": "3165444335396f90057ce819d52ef634dd5c7643017766870f5785eed8c8789a",
+      "completion.json": "27997875e13ff034d34e75f34c58985a7bd2d07d7807982c205f5e8e138f9845"
+    },
+    "patch_sha256": "48a4ad62cb7d07cecb389d0dec5115d19d81fbdb7c6d1a6774a7a2bdc892f2a2",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Implement Metal activation steering through the existing SteerWorker API.",
+      "Validate vLLM-Metal worker-extension installation, the Granite W4A16 model load, Q/K probe delivery, and analyzer scores on Apple Silicon.",
+      "Implement and validate paged-attention Q/K capture and support for additional MLX model architectures if they are required beyond the selected non-paged Granite use case."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker_colab.ipynb, model configuration model_configs/attention_tracker/granite-3.1-2b-instruct-quantized.w4a16.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}
