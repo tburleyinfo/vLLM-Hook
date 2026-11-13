@@ -321,6 +321,11 @@ class QKCaptureWorker:
             return
         self._hooks_installed = True
         runner = self.model_runner
+        if type(runner).__module__.startswith("vllm_metal.v1."):
+            from mia.core.metal.qk_capture import install_metal_qk_capture
+
+            self._mia_metal_qk = install_metal_qk_capture(self)
+            return
         require_v2_runner(runner)
         stash = install_request_arg_stash(runner)
         self._step = None
@@ -882,6 +887,9 @@ class QKCaptureWorker:
 
     def clear_captured_states(self, external_req_id: str) -> None:
         """Remove captured states without returning them (cleanup on abort/disconnect)."""
+        metal_backend = getattr(self, "_mia_metal_qk", None)
+        if metal_backend is not None:
+            metal_backend.clear(external_req_id)
         consumer = getattr(self, "_capture_consumer", None)
         refused = getattr(self, "_qk_refused", None)
         if refused:
@@ -1045,4 +1053,3 @@ class QKCaptureWorker:
         # lazy: keep mia.core.delivery out of import mia
         from mia.core.delivery.artifact_writer import save_qk_cache_safetensors
         save_qk_cache_safetensors(cpu_cache, run_dir, self.hookq_mode, _worker_tp_rank(self))
-
