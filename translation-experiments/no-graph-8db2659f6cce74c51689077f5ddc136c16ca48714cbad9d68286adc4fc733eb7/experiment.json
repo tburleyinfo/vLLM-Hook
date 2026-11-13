@@ -1,0 +1,43 @@
+{
+  "condition": "no-graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "full-fresh-20261113-05",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/granite-3.1-8b-instruct.json)",
+  "patch_sha256": "8db2659f6cce74c51689077f5ddc136c16ca48714cbad9d68286adc4fc733eb7",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 344.94,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "completion.json": "f69f6d9928b2c681620b61943dfbe1576ca82c3f04e09cfb7d29154ccf99d424",
+      "metal_attention_tracker.md": "44debb518cdd3593700defc3f5bcbabef7170835b9df513d62acb329c070b39f"
+    },
+    "patch_sha256": "8db2659f6cce74c51689077f5ddc136c16ca48714cbad9d68286adc4fc733eb7",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Implement vLLM-Metal activation steering and hidden-state capture through the existing worker APIs.",
+      "Validate Granite Q/K capture on Apple Silicon, including actual callable-module wrapping, batching, request cleanup, and disk delivery."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/granite-3.1-8b-instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}

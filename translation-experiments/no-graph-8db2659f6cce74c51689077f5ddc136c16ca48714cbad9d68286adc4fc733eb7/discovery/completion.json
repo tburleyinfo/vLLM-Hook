@@ -1,0 +1,1 @@
+{"status":"incomplete","remaining_work":["Implement vLLM-Metal activation steering and hidden-state capture through the existing worker APIs.","Validate Granite Q/K capture on Apple Silicon, including actual callable-module wrapping, batching, request cleanup, and disk delivery."]}
