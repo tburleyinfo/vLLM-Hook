@@ -1,0 +1,369 @@
+diff --git a/TRANSLATION.md b/TRANSLATION.md
+new file mode 100644
+index 0000000..2c5ab62
+--- /dev/null
++++ b/TRANSLATION.md
+@@ -0,0 +1,72 @@
++# vLLM-Metal translation
++
++**Status: incomplete.** CPU/CUDA files, APIs, dependency profiles and backend installation
++paths remain in place. A separate `metal` dependency extra and an MLX Llama Q/K capture adapter
++were added. The adapter wraps the existing Q/K projections, applies the model's RoPE, exports
++an MIA-compatible probe payload, and restores original projections on `close()`. This is a
++capture primitive only; it is not connected to `MiaLLM` or the Metal worker lifecycle.
++
++## Attention Tracker usage and status
++
++The selected config is
++`model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json`. Install the target profile on
++Apple Silicon from the repository root with:
++
++```bash
++python -m pip install -e '.[metal]'
++```
++
++The target runtime settings for this task are:
++
++```bash
++export VLLM_ENABLE_V1_MULTIPROCESSING=0
++export VLLM_METAL_USE_PAGED_ATTENTION=0
++export VLLM_METAL_MEMORY_FRACTION=auto
++export VLLM_PLUGINS=metal
++```
++
++Do not treat the following as a complete use-case invocation yet: although
++`MetalAttentionCapture(model, layer_to_heads)` can create the existing Q/K probe payload for
++`AttntrackerAnalyzer`, the inspected vLLM-Metal source provides no supported point at which
++the adapter can obtain the scheduled request's extra args, bracket the correct model forward,
++and return the payload through `MiaLLM.generate`'s normal `probes` lifecycle. The target's
++non-paged Llama generation itself remains owned by vLLM-Metal; standalone MLX generation is
++not used as a fallback. End-to-end runnable Attention Tracker usage requires the integration
++listed below and has not been claimed.
++
++The existing analyzer hand-off is:
++
++```python
++stats = llm.analyze(
++    analyzer_spec={"input_range": ranges, "attn_func": "sum_normalize"},
++    probes=outputs[0].probes,
++)
++```
++
++The selected model requires gated-model access and sufficient Apple unified memory. Target
++versions available from the inspected source are vLLM-Metal 0.2.0 and mlx-lm 0.31.3; `mlx` is
++an unpinned dependency of this added profile because no corresponding source version pin was
++provided.
++
++## Checks actually performed
++
++- Inspected the repository's Attention Tracker config, notebook, Q/K worker, analyzer, public
++  `MiaLLM` API and delivery path.
++- Inspected the supplied vLLM-Metal platform, worker, model runner/lifecycle, SDPA wrapper,
++  Llama model source and hook-primitives note.
++- Added `tests/metal/test_attention_tracker_backend.py` to check the adapter's expected Q/K
++  probe schema and its compatibility with the existing analyzer.
++- No tests, builds, package installation, model generation or Apple Silicon runtime checks
++  were performed in this environment.
++
++## Remaining implementation work
++
++- Connect request metadata, capture scope, model lifecycle and Q/K probe delivery to the
++  existing `MiaLLM` and server APIs on vLLM-Metal without changing request behavior or
++  teardown semantics.
++- Implement activation steering through the existing `steer` API on the target backend.
++- Exercise lifecycle, request routing, capture values/RoPE positions, analysis, generation and
++  cleanup against an Apple Silicon installation of the declared target libraries.
++
++Detailed source findings are in
++[`translation_discovery/attention_tracker-metal.md`](translation_discovery/attention_tracker-metal.md).
+diff --git a/mia/backends/__init__.py b/mia/backends/__init__.py
+new file mode 100644
+index 0000000..8c51f75
+--- /dev/null
++++ b/mia/backends/__init__.py
+@@ -0,0 +1 @@
++"""Backend-specific implementations used by MIA."""
+diff --git a/mia/backends/metal/__init__.py b/mia/backends/metal/__init__.py
+new file mode 100644
+index 0000000..ce7c3ad
+--- /dev/null
++++ b/mia/backends/metal/__init__.py
+@@ -0,0 +1,5 @@
++"""vLLM-Metal integrations."""
++
++from mia.backends.metal.attention_tracker import MetalAttentionCapture
++
++__all__ = ["MetalAttentionCapture"]
+diff --git a/mia/backends/metal/attention_tracker.py b/mia/backends/metal/attention_tracker.py
+new file mode 100644
+index 0000000..02dd71a
+--- /dev/null
++++ b/mia/backends/metal/attention_tracker.py
+@@ -0,0 +1,191 @@
++"""MLX projection instrumentation for Llama-family Attention Tracker capture.
++
++The adapter records post-RoPE Q/K from the actual mlx_lm model. It deliberately
++does not generate tokens: generation remains owned by vLLM-Metal.
++"""
++from __future__ import annotations
++
++import threading
++from contextlib import contextmanager
++from typing import Any, Iterator
++
++import torch
++
++
++class MetalAttentionCapture:
++    """Capture Attention Tracker Q/K from a loaded mlx_lm Llama model.
++
++    ``install`` wraps the model's existing Q/K projections. Call
++    ``capture_scope`` around the vLLM-Metal model forward that belongs to a
++    request, then pass ``to_probes()`` to MIA's existing analyzer.
++    """
++
++    def __init__(self, model: Any, layer_to_heads: dict[int, list[int]]) -> None:
++        import mlx.core as mx
++
++        self._mx = mx
++        args = getattr(model, "args", None)
++        if args is None:
++            raise TypeError("MetalAttentionCapture requires an mlx_lm model with .args")
++        self.config = {
++            "num_attention_heads": int(args.num_attention_heads),
++            "num_key_value_heads": int(
++                getattr(args, "num_key_value_heads", args.num_attention_heads)
++            ),
++            "head_dim": int(
++                getattr(args, "head_dim", None)
++                or args.hidden_size // args.num_attention_heads
++            ),
++            "attention_multiplier": float(
++                (getattr(args, "head_dim", None)
++                 or args.hidden_size // args.num_attention_heads) ** -0.5
++            ),
++        }
++        self.layer_to_heads = {
++            int(layer): [int(head) for head in heads]
++            for layer, heads in layer_to_heads.items()
++        }
++        self._active = threading.local()
++        self._captured: dict[int, dict[str, torch.Tensor]] = {}
++        self._originals: list[tuple[Any, str, Any]] = []
++        try:
++            self._install(model)
++        except Exception:
++            self.close()
++            raise
++
++    def _install(self, model: Any) -> None:
++        import mlx.nn as nn
++
++        class ProjectionCapture(nn.Module):
++            def __init__(self, inner: Any, on_output) -> None:
++                super().__init__()
++                object.__setattr__(self, "_inner", inner)
++                object.__setattr__(self, "_on_output", on_output)
++
++            def __call__(self, *args, **kwargs):
++                output = self._inner(*args, **kwargs)
++                self._on_output(output)
++                return output
++
++        root = getattr(model, "language_model", model)
++        layers_container = getattr(root, "model", root)
++        layers = getattr(layers_container, "layers", None)
++        if layers is None:
++            raise TypeError(
++                f"Cannot locate mlx_lm transformer layers in {type(model).__name__}"
++            )
++
++        for layer_num, layer in enumerate(layers):
++            if self.layer_to_heads and layer_num not in self.layer_to_heads:
++                continue
++            attention = getattr(layer, "self_attn", None)
++            if attention is None:
++                continue
++            for projection_name, heads in (
++                ("q_proj", self.config["num_attention_heads"]),
++                ("k_proj", self.config["num_key_value_heads"]),
++            ):
++                projection = getattr(attention, projection_name, None)
++                if projection is None:
++                    raise TypeError(
++                        f"Layer {layer_num} attention lacks {projection_name}"
++                    )
++
++                def on_output(output, *, ln=layer_num, attn=attention,
++                              name=projection_name, n_heads=heads):
++                    self._capture_projection(ln, attn, name, n_heads, output)
++
++                self._originals.append((attention, projection_name, projection))
++                setattr(
++                    attention,
++                    projection_name,
++                    ProjectionCapture(projection, on_output),
++                )
++
++    @contextmanager
++    def capture_scope(self, request_id: str, position_offset: int = 0) -> Iterator[None]:
++        """Enable capture during one model forward; restore nested state on exit."""
++        previous = getattr(self._active, "request", None)
++        request = {
++            "request_id": str(request_id),
++            "position_offset": int(position_offset),
++        }
++        self._active.request = request
++        try:
++            yield
++        finally:
++            self._active.request = previous
++
++    def _capture_projection(
++        self, layer_num: int, attention: Any, name: str, heads: int, output: Any
++    ) -> None:
++        request = getattr(self._active, "request", None)
++        if request is None:
++            return
++        if name not in ("q_proj", "k_proj"):
++            return
++
++        batch, seq_len, _ = output.shape
++        if batch != 1:
++            raise ValueError(
++                "MetalAttentionCapture currently requires one request per forward; "
++                f"got batch size {batch}"
++            )
++        head_dim = self.config["head_dim"]
++        shaped = output.reshape(batch, seq_len, heads, head_dim).transpose(0, 2, 1, 3)
++        rope = getattr(attention, "rope", None)
++        if rope is None:
++            raise TypeError(
++                f"Layer {layer_num} attention does not expose mlx_lm's RoPE module"
++            )
++        rotated = rope(shaped, offset=request["position_offset"])
++        if name == "q_proj":
++            rotated = rotated[:, :, -1:, :]
++        flattened = rotated.transpose(0, 2, 1, 3).reshape(
++            batch, -1, heads * head_dim
++        )[0]
++        value = self._to_torch(flattened)
++        entry = self._captured.setdefault(layer_num, {})
++        entry["q" if name == "q_proj" else "k_all"] = value
++
++    def _to_torch(self, value: Any) -> torch.Tensor:
++        import numpy as np
++
++        compatible = self._mx.contiguous(value.astype(self._mx.float32))
++        self._mx.eval(compatible)
++        return torch.from_numpy(np.asarray(compatible).copy())
++
++    def to_probes(self) -> dict:
++        """Return the standard MIA Q/K probe payload for the active capture."""
++        qk_cache = {}
++        for layer_num, tensors in sorted(self._captured.items()):
++            if "q" not in tensors or "k_all" not in tensors:
++                raise RuntimeError(
++                    f"Incomplete Q/K capture for layer {layer_num}; "
++                    "both projections must run in the same model forward"
++                )
++            qk_cache[str(layer_num)] = {
++                "q": [tensors["q"]],
++                "k_all": [tensors["k_all"]],
++                "layer_num": layer_num,
++                "hookq_mode": "last_token",
++            }
++        missing_layers = sorted(set(self.layer_to_heads) - self._captured.keys())
++        if missing_layers:
++            raise RuntimeError(
++                f"No Q/K data was captured for configured layers {missing_layers}"
++            )
++        if not qk_cache:
++            raise RuntimeError("No Q/K data was captured in the active request scope")
++        return {"config": dict(self.config), "qk_cache": qk_cache}
++
++    def clear(self) -> None:
++        """Clear captured tensors between requests."""
++        self._captured.clear()
++
++    def close(self) -> None:
++        """Restore every original projection; repeated calls are safe."""
++        while self._originals:
++            owner, name, original = self._originals.pop()
++            setattr(owner, name, original)
+diff --git a/pyproject.toml b/pyproject.toml
+index 028c317..5f56f09 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -34,6 +34,15 @@ cuda = [
+     "zstandard==0.25.0",
+ ]
+ 
++# Apple Silicon vLLM-Metal. The pins match the supplied target-library sources;
++# the existing CPU/CUDA profiles and their installation paths remain unchanged.
++metal = [
++    "mlx",
++    "mlx-lm==0.31.3",
++    "vllm==0.29.0",
++    "vllm-metal==0.2.0",
++]
++
+ [dependency-groups]
+ test = ["pytest"]
+ # Same-machine numerical comparison runner shares the existing test tools.
+@@ -61,6 +70,8 @@ vllm-cpu-wheel-sha256 = "4d22dac8259e7e24dbc615531c73cbd1a6d4b4214a3329ccddb7854
+ # These profiles are deliberately separate, even on a CUDA-capable CPU host.
+ conflicts = [
+     [{ extra = "cpu" }, { extra = "cuda" }],
++    [{ extra = "metal" }, { extra = "cpu" }],
++    [{ extra = "metal" }, { extra = "cuda" }],
+ ]
+ 
+ [tool.uv.sources]
+diff --git a/tests/metal/test_attention_tracker_backend.py b/tests/metal/test_attention_tracker_backend.py
+new file mode 100644
+index 0000000..ec0cfbb
+--- /dev/null
++++ b/tests/metal/test_attention_tracker_backend.py
+@@ -0,0 +1,41 @@
++import pytest
++import torch
++
++pytest.importorskip("vllm")
++
++from mia.backends.metal.attention_tracker import MetalAttentionCapture
++from mia.analyzers.attention_tracker_analyzer import AttntrackerAnalyzer
++
++
++def test_probe_payload_preserves_mia_qk_contract(tmp_path):
++    capture = MetalAttentionCapture.__new__(MetalAttentionCapture)
++    capture.config = {
++        "num_attention_heads": 2,
++        "num_key_value_heads": 1,
++        "head_dim": 2,
++        "attention_multiplier": 2**-0.5,
++    }
++    capture._captured = {
++        5: {
++            "q": torch.tensor([[1.0, 0.0, 0.0, 1.0]]),
++            "k_all": torch.tensor(
++                [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [2.0, 1.0]]
++            ),
++        }
++    }
++
++    probes = capture.to_probes()
++    analyzer = AttntrackerAnalyzer(str(tmp_path), {5: [0, 1]})
++    result = analyzer.analyze(
++        analyzer_spec={
++            "input_range": [((0, 2), (2, 4))],
++            "attn_func": "sum_normalize",
++        },
++        probes=probes,
++    )
++
++    assert probes["qk_cache"]["5"]["hookq_mode"] == "last_token"
++    assert probes["qk_cache"]["5"]["q"][0].shape == (1, 4)
++    assert probes["qk_cache"]["5"]["k_all"][0].shape == (4, 2)
++    assert len(result["score"]) == 1
++    assert torch.isfinite(torch.tensor(result["score"])).all()

@@ -1,0 +1,8 @@
+{
+  "status": "incomplete",
+  "remaining_work": [
+    "Wire request-scoped Q/K capture and probe delivery through MiaLLM and the vLLM-Metal worker/model-runner lifecycle.",
+    "Implement activation steering through the existing steer API on vLLM-Metal.",
+    "Run the Attention Tracker integration and lifecycle tests on Apple Silicon with the target dependencies."
+  ]
+}
