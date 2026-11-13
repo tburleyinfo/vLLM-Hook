@@ -1,0 +1,25 @@
+{
+  "condition": "graph",
+  "patch_sha256": "10a47c6b20eee44cbc71b3f17fa60900c3aafbfd4aeb5cadd8fabaee68d4cdea",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "validation": "skipped",
+  "pilot": true,
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Run the added Metal capture/analyzer test and the selected Attention Tracker example on a supported Apple Silicon vLLM-Metal runtime; verify worker-extension dispatch and end-to-end probe delivery.",
+      "Validate compatible mlx and mlx-lm versions against vllm-metal==0.2.0 and vllm==0.29.0, then pin them if required.",
+      "Implement and validate Metal steering and non-QK capture workers if those existing public APIs are required beyond the selected Attention Tracker use case."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/Mistral-7B-Instruct-v0.3.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "experiment_id": "full-fresh-20261113-02",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/Mistral-7B-Instruct-v0.3.json)",
+  "runtime_validation_required": false,
+  "validator_sha256": "a96dd7b92f17f75f2d491f8d17d5057d68f43e2ece76c3275a12b78efdaf527c"
+}
