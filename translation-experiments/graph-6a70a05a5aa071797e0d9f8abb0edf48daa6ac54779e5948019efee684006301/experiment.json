@@ -1,0 +1,44 @@
+{
+  "condition": "graph",
+  "source_revision": "8c0f2f4df88511e6e487d6af813dc7d8c2b91027",
+  "experiment_id": "full-fresh-20261113-01",
+  "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json)",
+  "patch_sha256": "6a70a05a5aa071797e0d9f8abb0edf48daa6ac54779e5948019efee684006301",
+  "generation": {
+    "exit_code": 0,
+    "seconds": 544.78,
+    "log": "translation.log",
+    "status": "pass",
+    "translator_cli_version": "GitHub Copilot CLI 1.0.97.\nRun 'copilot update' to check for updates.",
+    "resolved_models": [
+      "gpt-6-luna"
+    ],
+    "experimental_status": "pilot",
+    "discovery_artifacts": {
+      "attention_tracker.md": "e20f653da2b44364c6f72ec50abeb1031f77e02da120c6443f4c2b3b5621dd24",
+      "completion.json": "0c76651cb52b6163a9b2e4eeb3d851741fa736ac747e9d8c5a50587088905090"
+    },
+    "patch_sha256": "6a70a05a5aa071797e0d9f8abb0edf48daa6ac54779e5948019efee684006301",
+    "patch_nonempty": true
+  },
+  "completion": {
+    "status": "incomplete",
+    "errors": [
+      "Translator did not declare completed implementation with no remaining work"
+    ],
+    "remaining_work": [
+      "Implement and validate Metal hidden-state capture and activation steering through the existing public APIs.",
+      "Integrate Q/K capture with vLLM-Metal paged attention and server/remote-worker lifecycles.",
+      "Run the added tests and selected Attention Tracker example on the target Apple-Silicon environment."
+    ],
+    "notebooks": {},
+    "use_case": "Attention Tracker (notebooks/demo_attntracker.ipynb, model configuration model_configs/attention_tracker/Meta-Llama-3-8B-Instruct.json)",
+    "scope": "Translator completion declaration and required deliverables; runtime validation is separate"
+  },
+  "validation": {
+    "status": "skipped",
+    "reason": "Manual runtime validation selected"
+  },
+  "runtime_correctness": "Not established by generation; see validation scope.",
+  "graph_advantage": "Not established"
+}

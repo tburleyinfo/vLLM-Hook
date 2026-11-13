@@ -1,5 +1,7 @@
 """MiaLLM: a vllm.LLM wrapper that arms MIA capture or steering and runs analyzers."""
 import copy
+import contextlib
+import math
 import os
 import json
 import uuid
@@ -116,6 +118,13 @@ class MiaLLM:
         self._steering_config: Optional[Dict] = None
         if config_file:
             self.load_config(config_file)
+        from mia.backends.vllm_metal.qk_capture import metal_plugin_requested
+        self._metal_qk_capture = (
+            worker_name == "capture_qk" and metal_plugin_requested()
+        )
+        if self._metal_qk_capture:
+            from mia.backends.vllm_metal.qk_capture import install
+            install()
 
         # Unknown names are refused before the engine is built.
         worker = analyzer_entry = None
@@ -127,6 +136,8 @@ class MiaLLM:
                 raise ValueError(f"Unknown worker: {worker_name!r}. "
                                  f"Available: {PluginRegistry.list_workers()}")
             worker = worker_entry.path
+        if self._metal_qk_capture:
+            worker = None
         if analyzer_name:
             analyzer_entry = PluginRegistry.get_analyzer(analyzer_name)
             if analyzer_entry is None:
@@ -138,13 +149,23 @@ class MiaLLM:
             llm_kwargs['download_dir'] = download_dir
         # lazy: keep mia.core._plugin and mia.core.hooks out of import mia
         from mia.core._plugin import engine_hints
+        prior_metal_capture = os.environ.get("MIA_METAL_QK_CAPTURE")
+        if self._metal_qk_capture:
+            os.environ["MIA_METAL_QK_CAPTURE"] = "1"
         with engine_hints(qk_score=self._qk_capture == "score"):
-            self.llm = LLM(
-                model=model,
-                worker_extension_cls=worker,
-                enforce_eager=enforce_eager,
-                **llm_kwargs,
-            )
+            try:
+                self.llm = LLM(
+                    model=model,
+                    worker_extension_cls=worker,
+                    enforce_eager=enforce_eager,
+                    **llm_kwargs,
+                )
+            finally:
+                if self._metal_qk_capture:
+                    if prior_metal_capture is None:
+                        os.environ.pop("MIA_METAL_QK_CAPTURE", None)
+                    else:
+                        os.environ["MIA_METAL_QK_CAPTURE"] = prior_metal_capture
 
         self.tokenizer = self.llm.get_tokenizer()
         self.llm_engine = self.llm.llm_engine
@@ -156,8 +177,19 @@ class MiaLLM:
             H_kv = int(getattr(tc, "num_key_value_heads", H_q))
             hidden = int(getattr(tc, "hidden_size"))
             self._model_dims = {"H_q": H_q, "H_kv": H_kv, "d": hidden // H_q}
+            head_dim = int(getattr(tc, "head_dim", hidden // H_q))
+            self._metal_qk_config = {
+                "num_attention_heads": H_q,
+                "num_key_value_heads": H_kv,
+                "hidden_size": hidden,
+                "head_dim": head_dim,
+                "attention_multiplier": float(
+                    getattr(tc, "attention_multiplier", 1 / math.sqrt(head_dim))
+                ),
+            }
         except Exception:
             self._model_dims = None
+            self._metal_qk_config = None
         self._autosel_log_n = 0
 
         self.analyzer = None
@@ -343,6 +375,42 @@ class MiaLLM:
                 new_sp_list.append(sp)
             sp_list = new_sp_list
 
+        if self._metal_qk_capture and hook:
+            # Metal capture is delivered by the local MLX observer, not by the
+            # CUDA/CPU worker RPC path installed by the general MIA plugin.
+            metal_worker_args = {
+                "output_qk", "hookq_mode", "qk_capture", "score_head",
+                "save_to_disk", "run_id", "hook_dir",
+            }
+            output_layers = []
+            capture_layers = set()
+            stripped = []
+            for sp in sp_list:
+                sp = copy.copy(sp)
+                extra = dict(sp.extra_args or {})
+                output_qk = extra.get("output_qk")
+                if isinstance(output_qk, dict):
+                    layers = {int(layer) for layer in output_qk}
+                elif isinstance(output_qk, (list, tuple)):
+                    layers = {int(layer) for layer in output_qk}
+                else:
+                    layers = None
+                output_layers.append(layers)
+                if layers is not None:
+                    capture_layers.update(layers)
+                for key in metal_worker_args:
+                    extra.pop(key, None)
+                sp.extra_args = extra or None
+                stripped.append(sp)
+            sp_list = stripped
+            if output_layers and all(layers is not None for layers in output_layers):
+                metal_capture_layers = capture_layers
+            else:
+                metal_capture_layers = None
+        else:
+            output_layers = None
+            metal_capture_layers = None
+
         passthrough = {k: v for k, v in kwargs.items()
                        if k not in ("temperature", "max_tokens", "top_p", "top_k",
                                     "min_p", "n", "seed", "stop", "stop_token_ids",
@@ -350,11 +418,35 @@ class MiaLLM:
                                     "repetition_penalty")}
         PROF.incr("miallm.generate.calls")
         PROF.gauge("miallm.prompts", len(prompts))
-        with PROF.timed("miallm.generate"):
-            if all(sp is sp_list[0] for sp in sp_list):
-                outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
-            else:
-                outputs = self.llm.generate(prompts, sp_list, **passthrough)
+        metal_capture = None
+        capture_context = contextlib.nullcontext(None)
+        if self._metal_qk_capture and hook:
+            if self._metal_qk_config is None:
+                raise RuntimeError(
+                    "vLLM-Metal Q/K capture requires attention dimensions from the "
+                    "model configuration."
+                )
+            from mia.backends.vllm_metal.qk_capture import capture_generation
+            capture_context = capture_generation(
+                self._metal_qk_config,
+                metal_capture_layers,
+            )
+        with capture_context as metal_capture:
+            with PROF.timed("miallm.generate"):
+                if all(sp is sp_list[0] for sp in sp_list):
+                    outputs = self.llm.generate(prompts, sp_list[0], **passthrough)
+                else:
+                    outputs = self.llm.generate(prompts, sp_list, **passthrough)
+        if metal_capture is not None:
+            from mia.backends.vllm_metal.qk_capture import attach_probes
+            attach_probes(
+                outputs,
+                metal_capture,
+                output_layers=output_layers,
+                save_to_disk=save_to_disk,
+                hook_dir=self._hook_dir,
+                run_id=run_id,
+            )
 
         if hook and self.worker_name and not save_to_disk:
             # lazy: keep mia.core.delivery out of import mia
@@ -409,4 +501,3 @@ class MiaLLM:
             self.close()
         except Exception:
             pass
-

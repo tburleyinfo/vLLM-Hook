@@ -1,0 +1,8 @@
+{
+  "status": "incomplete",
+  "remaining_work": [
+    "Implement and validate Metal hidden-state capture and activation steering through the existing public APIs.",
+    "Integrate Q/K capture with vLLM-Metal paged attention and server/remote-worker lifecycles.",
+    "Run the added tests and selected Attention Tracker example on the target Apple-Silicon environment."
+  ]
+}
